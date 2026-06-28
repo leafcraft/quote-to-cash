@@ -1,0 +1,13 @@
+.env
+.env.*
+__pycache__/
+*.pyc
+.pytest_cache/
+logs/
+.git/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+tests/
+README.md

@@ -1,0 +1,20 @@
+{
+  "_entry_point": "rep_initiated",
+  "_description": "Sales rep files a standard RFQ \u2014 line items, target close. Routes through cost calc \u2192 discount policy (tier-1) \u2192 deal-desk approval.",
+  "payload": {
+    "rfq_id": "RFQ-2026-1144",
+    "customer_id": "cust-strix-systems",
+    "customer_name": "Strix Systems",
+    "rep_email": "ae.amelia@example",
+    "line_items": [
+      {
+        "sku": "PRO-SAAS-50",
+        "quantity": 50,
+        "list_price_cents": 240000,
+        "description": "Pro tier \u2014 50 seats annual"
+      }
+    ],
+    "target_close": "2026-07-15",
+    "customer_segment": "smb"
+  }
+}

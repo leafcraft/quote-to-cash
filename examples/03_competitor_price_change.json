@@ -1,0 +1,13 @@
+{
+  "_entry_point": "competitor_price_change",
+  "_description": "Competitor cut prices \u2014 discount tier matrix is refreshed.",
+  "payload": {
+    "competitor": "Acme Alternative",
+    "product_line": "Pro tier",
+    "observed_price_cents": 199000,
+    "our_list_cents": 240000,
+    "delta_pct": -0.171,
+    "effective_from": "2026-06-01",
+    "deal_pipeline_impacted": 23
+  }
+}
