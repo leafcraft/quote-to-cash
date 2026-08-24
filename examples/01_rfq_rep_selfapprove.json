@@ -1,0 +1,13 @@
+{
+  "_entry_point": "rep_initiated",
+  "_description": "Small, healthy, low-discount deal — Cass prices it, the matrix routes it to the sales rep's own self-approval tier (rep -> drafter -> issuer).",
+  "data": {
+    "rfq_id": "RFQ-2026-1144",
+    "customer_id": "ACME-4471",
+    "segment": "mid_market",
+    "target_close": "2026-09-15",
+    "line_items": [
+      {"sku": "PRO-SEAT", "qty": 10, "list_price_cents": 120000}
+    ]
+  }
+}

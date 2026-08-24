@@ -1,152 +1,138 @@
-# quote-to-cash — Quote to Cash
+# quote-to-cash — Quote-to-Cash Pod
 
-An RFQ-to-quote desk as a department of self-reliant agents. A request for
-quote arrives, costs are pulled from your price book, a discount tier is
-chosen, the right human approver signs off (rep → deal desk → finance →
-CFO, by deal size × margin × discount), and a quote is drafted — every
-terminal path landing in a hash-chained WORM audit. 13 agents, YAML-first:
-the entire approval policy is declared as wire conditions on one agent.
+Five digital employees + five human roles that run a deal from an **RFQ all
+the way to cash** — **RFQ → shape a priced, policy-compliant deal
+(super-agent) → approval matrix (rep / deal-desk / finance / CFO) → draft →
+ISSUE the quote artifact (finisher, fail-closed) → invoice → dun the overdue
+backlog** — with a human on every approval gate and the systems (CPQ / ERP /
+CLM / billing) as tools inside the agents, never members.
+
+**Read `PRD.md`** for the full agent-by-agent spec. This is a **pod-standard**
+template (SDK 2.4.131): a team of self-reliant agents, not a pipeline.
 
 ## Story
 
-A regional sales rep, **Priya**, gets an RFQ by email from an existing mid-
-market customer: 40 seats of the Pro SKU, wants it closed this quarter.
-The email hits the `rfq_email` entry point and lands on the **RFQ intake
-specialist** (`rfq_ingester_agent`), which normalises it into a clean
-record — customer_id, line_items (sku, qty, list_price_cents),
-target_close — and hands it to the **cost analyst**
-(`cost_calculator_agent`). The cost analyst calls the price-book lookup
-tool on the company's CPQ MCP server and returns total COGS, total list,
-and gross margin.
-
-The **pricing strategist** (`discount_policy_agent`) reads that, weighs
-customer history and any competitive signal, and picks a 12% discount
-(tier_2). Its own outbound wires *are* the approval matrix: at 12% discount
-on a sub-$100K, healthy-margin deal, exactly one edge fires — the **deal
-desk approver** (`deal_desk_human`). Before the gate, a small Python stash
-writer saves the full deal context keyed by session, because the SDK
-resumes a chain after a human gate with only the human's response.
-
-The deal desk approver sees a 2-3 sentence briefing in their inbox and
-replies `approve`. That routes to the **quote writer**
-(`quote_drafter_agent`), which recovers the stashed deal context and drafts
-the quote body (pricing table, terms, validity, next steps). The writer
-hands off to the **quote issuer** (`quote_issuer_agent`), the
-artifact-producing executor that *finishes the job*: it renders the
-approved quote to a real document at `./out/<quote_id>.pdf` (ReportLab; or
-a deterministic `.md` when ReportLab isn't installed) and pushes it to your
-CPQ (`CPQ_WEBHOOK_URL`, inert until set; a dev store records the issued
-quote otherwise) — but only after a **fail-closed floor** re-derives the
-required approver from the financials and confirms the deal was approved by
-the right tier; an unapproved or under-approved quote is never written. The
-issuer then calls the **compliance archivist** (`qtc_audit_logger_agent`),
-which appends a hash-chained WORM entry. If the deal desk had stayed silent
-past its timeout, the gate fails *toward* finance, not into silence.
+A mid-market RFQ lands from **ACME** — 40 Pro seats plus onboarding, close by
+month-end. Today a rep would key the line items, look up costs in the price
+book, guess a discount that beats the competitor, chase the right approver,
+draft the quote, and — weeks later — remember to invoice and then chase the
+payment. This pod runs that whole chain. **Quinn** opens the case and hands it
+to **Cass**, who pulls the price book, this account's deal history, and
+competitor pricing, then shapes a defensible discount. A deterministic floor
+recomputes the margin and tier, so the **approval matrix routes to exactly one
+human** — a healthy small deal to the rep, a deep discount straight to the CFO,
+no gaming it. On approval the **drafter** assembles the quote and the
+**issuer** renders the real artifact and pushes it to the CPQ — and *deletes it*
+if the deal turns out under-approved. When the customer accepts, **billing**
+raises the invoice; every morning it fans out across parallel copies to dun the
+overdue backlog, each copy claiming a disjoint batch so nobody is chased twice.
 
 ## Why it works in an organization
 
-Quote-to-cash is where revenue leaks: discounts approved out of policy,
-deals stuck waiting on the wrong approver, quotes sent with margins below
-floor, contracts signed with clauses nobody flagged. This desk encodes the
-discount-approval matrix *as enforceable wires* — a sales controller can
-read the whole policy in one config block, and no deal can skip its tier.
-Reps self-serve small healthy deals in seconds; only the deals that
-genuinely need deal desk / finance / CFO judgment reach a human, and those
-arrive with a briefing already written. Side flows add cross-sell
-suggestions (more revenue per quote) and a deal-compliance analyst that
-hard-gates unacceptable contract clauses and routes ASC 606 ambiguity to
-the CFO (less restatement risk). Every approval and every quote is in a
-tamper-evident audit trail for the auditor and the regulator.
+Quote-to-cash leaks at the seams: a discount that quietly dips below margin
+floor, a quote approved by the wrong tier, an invoice that never goes out, an
+overdue account nobody swept. This pod closes each seam the only honest way.
+**Cass never invents a cost basis** — a code floor recomputes COGS, margin, and
+the discount tier from the price book, so the gate fires on *computed* numbers,
+not the model's. **The approval matrix is wires, not code** — the whole
+amount × margin × discount policy is readable in one block, and exactly one tier
+fires per deal. **The issuer re-checks that the *required* approver actually
+cleared the deal** (re-derived in code from the financials) before it issues
+anything, and **deletes a half-issued quote** if its floor trips. **Silence
+never advances a deal** — every gate default-denies to `held_for_review` and
+records it. **Billing never duns a paid invoice**, and its atomic claim means
+parallel workers split the backlog instead of double-chasing. Every decision,
+approval, issuance, held gate, and dunning action lands in a hash-chained WORM
+ledger. ROI: faster quotes, real margin control, no missed invoices, and a live
+"where is my quote?" answer.
 
-## Configuration
+## The team (11 members)
 
-Three tiers — see `env` for the full annotated list.
-
-### Tier 1 · Boot (required)
-| Var | Purpose |
-|---|---|
-| `LEAFMESH_LICENSE_KEY` | starts the SDK (required) |
-| `LEAFMESH_ENV_TOKEN` | per-environment telemetry token |
-| `OPENAI_API_KEY` | all `gpt-4o-mini` agents + the manager |
-| `ANTHROPIC_API_KEY` | `deal_compliance_agent` (claude-sonnet-4-6) |
-
-### Tier 2 · State store (defaults work locally)
-`REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` — default to local Redis
-(`docker compose up redis -d`). Approval thresholds are **not** env vars;
-they are wire conditions on `discount_policy_agent` in
-`configs/config.yaml`.
-
-### Tier 3 · Connectors (optional — inert until set)
-System-of-record agents point at YOUR stack:
-| Var | Powers |
-|---|---|
-| `CPQ_MCP_URL` / `CPQ_MCP_TOKEN` | `cost_calculator_agent` — your CPQ/ERP price book (**not auto-consumed**; wire into `load_price_book` — the seeded dev store works day-0) |
-| `CPQ_WEBHOOK_URL` / `CPQ_WEBHOOK_TOKEN` | `quote_issuer_agent` — your CPQ create-quote webhook (Salesforce CPQ / DealHub / Conga); inert until set, the issuer still renders `./out/<quote>.pdf` and records a dev-store fallback |
-| `CLM_MCP_URL` / `CLM_MCP_TOKEN` | `contract_redline_tracker_agent` — redline ledger in your CLM |
-| `N8N_COMPETITOR_WATCH_WEBHOOK_URL` / `N8N_AUTH_TOKEN` | `competitor_watch_agent` — price-intelligence sweep (cron stays commented out until wired) |
-| `PAGER_WEBHOOK` | manager PagerDuty escalation target |
-| `SLACK_PRICING_CHANNEL` / `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` | manager Slack escalation — **not auto-consumed**; wire a Slack sender in code/connector |
-
-## Agents
-
-| Agent | Role | Responsibilities | Can perform |
+| Agent | Role (human job title) | Responsibilities | Can perform |
 |---|---|---|---|
-| `rfq_ingester_agent` | RFQ intake specialist | Normalises inbound RFQs (email / CPQ event / rep-initiated / manual) into a clean record (customer_id, line_items, target_close) | LLM extraction; routes to the cost analyst |
-| `cost_calculator_agent` | Cost analyst | Costs the RFQ's line items; a **code floor recomputes COGS / list / gross margin** from the price book of record (the model can't fake a margin) and flags regulated SKUs | LLM + `@pre_compose` (price book) + `@chain` cost floor; seeded dev store day-0, CPQ/ERP MCP in prod; routes to the pricing strategist |
-| `discount_policy_agent` | Pricing strategist | Picks the discount from customer history + competitive signals; a **code floor derives the tier and the post-discount margin the approval matrix routes on**; **its outbound wires are the approval matrix** | LLM + `@pre_compose` (deal history, competitor pricing, policy table) + `@chain` discount floor + `@compose` (approver brief vs full deal); fans out to exactly one of rep / deal desk / finance / CFO; pre-gate context stash |
-| `quote_drafter_agent` | Quote writer | Assembles the quote body (pricing table, terms, validity, next steps) after the human gate; never auto-sends | LLM + Python recovery of stashed deal context; fail-soft fallback body; routes to the quote issuer |
-| `quote_issuer_agent` | Quote issuer | **Artifact-producing executor that finishes the job** — renders the approved quote to `./out/<quote_id>.pdf` (ReportLab; deterministic `.md` fallback) and pushes to your CPQ; a **fail-closed floor never issues an unapproved or under-approved quote** (re-derives the required approver from the financials) | Programmatic actuator + `@chain` issuance floor; CPQ push via `CPQ_WEBHOOK_URL` (inert until set) with a dev-store fallback; routes to the compliance archivist |
-| `competitor_watch_agent` | Competitive-intelligence watcher | Surfaces competitor price changes from your price-intelligence stack | n8n webhook; standalone (cron disabled until wired) |
-| `bundle_recommender_agent` | Cross-sell strategist | Suggests adjacent SKUs from purchase history, similar accounts, product affinity, and use-case completeness; suppresses anything previously declined | LLM (knowledge: `product_affinity`); routes to the rep when there are candidates, else to audit |
-| `contract_redline_tracker_agent` | Contract redline registrar | Tracks who changed what across contract versions (open / update / report); flags redlines stalled past lead time | MCP tool `redline_ledger` on your CLM; routes the morning brief to the deal desk |
-| `deal_compliance_agent` | Deal-compliance analyst | Mode `contract_review`: clause-by-clause playbook check (unacceptable = hard gate). Mode `rev_rec`: ASC 606 classification (POs, SSP allocation, recognition pattern) | LLM (claude-sonnet-4-6, knowledge: `rev_rec_policy`); hard-gates unacceptable clauses to the finance approver for legal sign-off, negotiable to deal desk, rev-rec ambiguity to the CFO |
-| `sales_rep_human` | Sales representative | Self-approves small, healthy-margin, low-discount deals (≤ $25K, ≥ 20% margin, ≤ 10% discount) | Human gate; approve → quote writer, escalate → deal desk, reject → audit; default-deny to deal desk on timeout |
-| `deal_desk_human` | Deal desk approver | Approves discounted / mid-size deals (≤ $100K, ≤ 20% discount) | Human gate; approve → quote writer, escalate → finance, reject → audit; default-deny to finance on timeout |
-| `finance_approver_human` | Finance approver | Approves large / lower-margin deals (≤ $1M) and signs off legally-flagged contracts | Human gate; approve → quote writer, escalate → CFO, reject → audit; default-deny to CFO on timeout |
-| `cfo_human` | Chief Financial Officer | Top-tier authority — margin below floor, discount > 30%, list > $1M, or rev-rec ambiguity | Human gate; approve → quote writer, else → audit; default-deny holds for review on timeout |
-| `qtc_audit_logger_agent` | Compliance archivist | Appends every terminal outcome to a tamper-evident, hash-chained WORM ledger | Custom external sink (registered in `main.py`); terminal |
+| `quinn_coordinator_agent` | Deal Coordinator | Owns the deal end to end; opens the case, keeps live status, is the single point of contact | LLM; orchestrates Cass→drafter→issuer→billing; routes exceptions to the RevOps Lead; **never prices or approves** |
+| `cass_shaper_agent` | Costing & Deal Shaper | Costs the RFQ, shapes a policy-compliant discount against history + competitive signals | LLM + **super_agent** (autonomous deal shaping) + **playbook** (quote / approve) + price/history/competitor tools; `@chain` **pricing + completeness floors** (fail closed); its wires **are** the approval matrix |
+| `drafter_agent` | Quote Drafter | Assembles the approved quote body + validity and renders a draft | LLM; `@chain` **validity floor** (caps shelf life by tier); renders the draft to `./out` |
+| `quote_issuer_agent` | Quote Issuer | Renders + issues the approved quote artifact and pushes it to the CPQ | Programmatic **finisher**; approve re-check + required-approver re-derivation → invariants → render `./out/<quote>.pdf` → **delete-on-block** → dev-store fallback → WORM |
+| `billing_agent` | AR & Collections Clerk | Invoices accepted quotes and duns the overdue backlog | LLM + **playbook** (invoice / dun) + **instances** (backlog fan-out) + **atomic claim** tool + `wake_up`/`timezone`; `@chain` **never duns a paid invoice** |
+| `sales_rep_human` | Sales Rep (Human) | Self-approves small healthy deals; reworks incomplete RFQs | Human gate |
+| `deal_desk_human` | Deal Desk (Human) | Approves discounted + competitive deals | Human gate |
+| `finance_approver_human` | Finance Approver (Human) | Approves margin + large deals | Human gate |
+| `cfo_human` | CFO (Human) | Top-tier authority (below-floor margin, deep discount, > $1M) | Human gate |
+| `revops_lead_human` | RevOps Lead (Human) | Accountable owner — resolves escalations, owns policy calls | Human gate — everything that leaves the pod |
+| `qtc_audit_logger_agent` | WORM audit | Hash-chains every decision, approval, issuance, held gate, dunning action | External (custom sink); terminus |
 
-## Day-0 dev store (no connectors)
+The **LeafMesh Manager** supervises — it reads every hand-off and escalates
+stalls / policy calls / approval timeouts to the RevOps Lead automatically.
 
-`agency/_shared/store.py` seeds a realistic mid-market RFQ
-(`RFQ-2026-0042` — 40 Pro seats + onboarding for `ACME-4471`), a per-SKU
-**price book** (unit cost + unit list), the **discount policy table**
-(tier bands + margin floor), **deal history**, and **competitor pricing**.
-The `@pre_compose` pulls and `@chain` floors read from it, so the FULL
-chain (cost → discount → approval routing → quote) runs end-to-end before
-any connector is wired. Swap each read for the matching connector in prod;
-the function signatures are the contract.
+## Prerequisites — what to set, in three tiers
 
-## Run
+Everything is set in `.env` (`cp env .env`). The **whole LLM chain (shape →
+approve → draft → issue → invoice → dun) runs on Tier 1 alone** against the
+seeded stores (`./data`); price-book, billing, and CPQ reads use dev
+stand-ins that **announce themselves** until you wire Tiers 2–3.
+
+### Tier 1 — required to boot (dev mode)
+| Setting | For | Notes |
+|---|---|---|
+| `LEAFMESH_LICENSE_KEY` | LeafMesh runtime | **Required.** |
+| `ANTHROPIC_API_KEY` | Cass (deal shaping, Claude) | **Required.** |
+| `OPENAI_API_KEY` | Quinn + drafter + billing + Manager (`gpt-4o-mini`) | **Required** unless you change the models. |
+| `REDIS_HOST` / `PORT` / `PASSWORD` | State store | Defaults to `localhost:6379`. `docker run -d -p 6379:6379 redis:7-alpine`. |
+| `HITL_OUTBOUND_URL` | Where human members are notified | Defaults to a local stub. |
+
+### Tier 2 — real system-of-record connectors (set the URL, uncomment the `mcp` block)
+| Setting | Enables |
+|---|---|
+| `CPQ_MCP_URL` / `_TOKEN` | Real CPQ/ERP price book + deal history (`cass_shaper_agent`) |
+| `BILLING_MCP_URL` / `_TOKEN` | Real billing/AR reads + writes (`billing_agent`) |
+
+> ⚠️ The SDK rejects an `mcp` block with an **empty** URL at load, so the blocks
+> ship **commented** in `configs/config.yaml`. Fill the URL, then uncomment.
+
+### Tier 3 — CPQ create-quote webhook (the finisher's push)
+| Setting | Enables |
+|---|---|
+| `CPQ_WEBHOOK_URL` / `_TOKEN` | The issuer pushes the issued quote to your CPQ. Inert until set; the issuer renders `./out/<quote>.pdf` and records a dev-store fallback regardless. |
+
+## Run it
 
 ```bash
-cp env .env && pip install -r requirements.txt && python main.py
+pip install -r requirements.txt          # core LeafMesh runs the pod day-0
+docker run -d -p 6379:6379 redis:7-alpine
+cp env .env                              # fill at least Tier 1
+python validate_config.py                # pre-flight: wiring, yields, dead-code
+python main.py                           # API at http://127.0.0.1:18820/docs
 ```
 
-### Try the seeded deal (copy-paste, no connectors)
+Submit an RFQ (day-0, against the seed store — no connector needed):
 
-```python
-import asyncio
-from agency._shared import store
-from agency import cost_calculator_agent as cost, discount_policy_agent as disc
-
-async def demo():
-    rfq = store.sample_rfq()                       # the seeded RFQ-2026-0042
-    items = rfq["line_items"]
-    # cost analyst — the floor recomputes the cost basis from the price book
-    cprep = cost.load_price_book({"line_items": items}, {})
-    c = await cost.enforce_cost_floor({}, {"prepared_data": {"context": cprep}})
-    print("cost:", c["total_cogs_cents"], c["total_list_cents"], c["gross_margin_pct"])
-    # pricing strategist — the floor derives the tier + post-discount margin
-    d = await disc.discount_policy_agent(
-        {"discount_pct": 0.12, "rfq_id": rfq["rfq_id"], "rationale": "renewal"},
-        {"session_id": "demo", "customer_id": rfq["customer_id"],
-         "segment": rfq["segment"], "upstream_yields": {"cost_calculator_agent": c}}, {})
-    print("discount:", d["tier"], d["gross_margin_pct"], "(12% on a sub-$100K, healthy-margin deal → deal desk)")
-
-asyncio.run(demo())
-# cost: 1860000 5300000 0.6491
-# discount: tier_2 0.6012 (12% on a sub-$100K, healthy-margin deal → deal desk)
+```bash
+curl -X POST http://127.0.0.1:18820/api/mesh/request \
+  -H "Content-Type: application/json" \
+  -d '{"entry_point":"rfq_email",
+       "data":{"rfq_id":"RFQ-2026-0042","customer_id":"ACME-4471",
+               "segment":"mid_market",
+               "line_items":[{"sku":"PRO-SEAT","qty":40,"list_price_cents":120000},
+                             {"sku":"ONBOARD-STD","qty":1,"list_price_cents":500000}]}}'
 ```
 
-See `PRD.md` for the full architecture, flow diagram, and design decisions.
+See `examples/` for the four scenarios (rep self-approval, a deep discount that
+forces the CFO tier, an accepted quote → invoice, and the dunning sweep):
+
+```bash
+python examples/run_examples.py
+```
+
+On approval, the issuer renders the approved quote to `./out/` and appends the
+hash-chained ledger at `./logs/qtc_audit.jsonl`.
+
+> Packaging note: `pip install leafmesh` (core) includes all LLM providers and
+> runs the pod. For real CPQ/ERP/billing connectors add `leafmesh[mcp]`. Avoid
+> `leafmesh[all]` on Python 3.12+ (it pulls `cchardet`, which has no wheel) — add
+> only the specific extras you need.
+
+---
+
+*Built with `create-leafmesh`. The config is the department; the PRD is the brief.*
+*Design doctrine: `.claude/skills/leafmesh/building-agents-thoroughly.md`.*

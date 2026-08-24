@@ -308,31 +308,15 @@ def _push_to_cpq(quote: dict, webhook_url: str, auth_token: str) -> dict[str, An
 
 
 def _record_dev_store(quote: dict) -> None:
-    """Dev-store fallback — record the issued quote so the chain is
-    observable with NO connector wired. PROD: your CPQ is the record."""
+    """Dev-store fallback — record the issued quote (and a ledger entry) so
+    the chain is observable with NO connector wired, and announces itself as
+    a dev record rather than a real CPQ ack. PROD: your CPQ is the record."""
     try:
-        store._DIR.mkdir(parents=True, exist_ok=True)  # type: ignore[attr-defined]
-        path = store._DIR / "issued_quotes.json"        # type: ignore[attr-defined]
-        data = {}
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (ValueError, OSError):
-                data = {}
-        data[quote["quote_id"]] = {
-            "quote_id": quote["quote_id"],
-            "rfq_id": quote.get("rfq_id", ""),
-            "customer_id": quote.get("customer_id", ""),
-            "tier": quote.get("tier", ""),
-            "approved_by": quote.get("approved_by", ""),
-            "total_cents": quote.get("total_cents", 0),
-            "valid_until": quote.get("valid_until", ""),
-            "issued_at": quote.get("issued_at", ""),
-            "artifact_path": quote.get("artifact_path", ""),
-        }
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-        tmp.replace(path)
+        store.record_issued_quote(quote)
+        store.append_ledger({"event": "quote_issued", "quote_id": quote.get("quote_id"),
+                             "approved_by": quote.get("approved_by", ""),
+                             "total_cents": quote.get("total_cents", 0),
+                             "source": "dev_store_fallback"})
     except Exception as e:  # pragma: no cover
         logger.warning(f"[quote-issuer] dev-store record failed: {e}")
 

@@ -8,6 +8,50 @@ allowed-tools: Read, Grep, Glob, Edit, Write, Bash
 
 You are an expert at building multi-agent orchestration systems with the LeafMesh SDK.
 
+> **SDK baseline: 2.4.131.** Before wiring or debugging agents, read
+> **[nuances-and-gotchas.md](nuances-and-gotchas.md)** — the 10 non-obvious rules
+> that cause almost every "my agent silently does nothing / the handoff looks
+> empty / Gemini behaves differently" report. The top three that bite hardest:
+> 1. An `llm` agent function MUST be `(llm_response, input_data, context)` —
+>    exactly 3 params, or it is **never called** (no error).
+> 2. Handoffs render BOTH the user message AND the upstream agent's structured
+>    fields (2.4.104 "read both") — don't hand-embed fields into `user_message`.
+> 3. `yields: foo: "array"` makes the model return **strings** — declare
+>    `items:` to get objects.
+
+> **The direction (READ before building):**
+> **[building-agents-thoroughly.md](building-agents-thoroughly.md)** — how to build
+> an agent and a mesh *thoroughly*, where every rule has a silent failure behind
+> it: the four stages (identity-only `@pre_compose`, fail-closed `@chain`), the
+> three instruction layers (prompt / flow / Skills — and the pairing rule that a
+> duplicated playbook line *kills* the Skill), truth protocols (never collapse
+> nothing / could-not-tell / declined; a stub must announce itself), where data
+> lives, the "registered ≠ offered" verification layers, the finisher pattern, and
+> **client intake + provisioning** — including "I have no backend → Supabase". Ends
+> with the *before-you-call-an-agent-finished* checklist.
+
+## Table of contents
+
+- [**Nuances & Gotchas (READ FIRST)**](nuances-and-gotchas.md)
+- [**Building agents & meshes thoroughly (the direction)**](building-agents-thoroughly.md)
+
+- [When the user asks you to… do this](#when-the-user-asks-you-to-do-this) — quick action table
+- [Rule 1 — A mesh is a TEAM, not a pipeline](#rule-1--a-mesh-is-a-team-not-a-pipeline)
+- [Rule 2 — One ROLE, multiple RESPONSIBILITIES](#rule-2--one-role-multiple-responsibilities-the-hiring-test)
+- [Rule 3 — Bound every retry back-edge](#rule-3--bound-every-retry-back-edge)
+- [How This Project Works](#how-this-project-works) · [Core SDK Pattern](#core-sdk-pattern) · [User-Facing APIs](#user-facing-apis)
+- [Agent Types](#agent-types) · [Super-Agent v3](#super-agent-v3) · [Skills System](#skills-system)
+- [Command Center (the business board)](#command-center-the-business-board) · [Image generation](#image-generation)
+- [STRICT — fields by `agent_type`](#strict--fields-by-agent_type) · [STRICT — `human_interface` rules](#strict--human_interface-rules)
+- [Human-in-the-Loop (HITL)](#human-in-the-loop-hitl)
+- [YAML Agent Config (All Fields)](#yaml-agent-config-all-fields) · [Condition Syntax](#condition-syntax-can_call-conditions)
+- [Decorators — Making an Agent Self-Reliant](#decorators--making-an-agent-self-reliant)
+- [Communication Types](#communication-types) · [Fan-In Patterns (`wait_for`)](#fan-in-patterns-wait_for) · [Tools](#tools)
+- [Manager (Coordination + Escalation)](#manager-coordination--escalation) · [LLM Providers](#llm-providers)
+- [Building New Agents — Step by Step](#building-new-agents----step-by-step)
+- [Session & Upstream Yields](#session--upstream-yields)
+- [Additional Resources](#additional-resources) · [Field reference](#field-reference)
+
 ## When the user asks you to... do this:
 
 | User says | Action |
@@ -15,6 +59,7 @@ You are an expert at building multi-agent orchestration systems with the LeafMes
 | "Add a new LLM agent" | 1. Add YAML block in `configs/config.yaml` 2. Create `agency/<name>_agent.py` (optional -- pure YAML works) 3. Wire `can_call` from upstream agents 4. Add entry point if needed |
 | "Add a programmatic agent" | 1. Add YAML block with `agent_type: "programmatic"` 2. If connector-only: add `integration` + `connector_config` (no Python needed) 3. If Python logic: create `agency/<name>_agent.py` 4. Wire `can_call` |
 | "Add an external agent" | 1. Add YAML block with `agent_type: "external"`, `framework`, and `connector_config` (no Python needed) 2. Optionally add `agency/<name>_agent.py` to post-process connector result 3. Wire `can_call` |
+| "Let this agent use an MCP server's tools" | Agent-level `mcp:` block — the server's tools join that agent's tool list. Do **not** re-list them under `tools:`. See [MCP servers as tools](agent-config-fields.md#mcp--mcp-servers-as-tools-the-normal-way) |
 | "Integrate with Zapier/n8n/Composio/MCP" | Programmatic: `integration: "zapier"` + `connector_config`. External: `framework: "n8n"` + `connector_config`. Pre-compose helper: `@pre_compose(context_processor=zapier(...))`. See reference.md for all connector fields. |
 | "Set up HITL / human review" | Pick **one** `human_interface`: `default` (inbox), `webhook` (channels/HTTP), or `api` (Python callback). Each one accepts a *different* set of config fields — see HITL section below. Mixing them (e.g. `default` + `webhook_config`) is rejected at YAML load. |
 | "Connect agents" / "wire routing" | Add `can_call` entries with conditions. Use `calling_agent_response.field` in conditions. |
@@ -23,7 +68,7 @@ You are an expert at building multi-agent orchestration systems with the LeafMes
 | "Schedule an agent" | Add `wake_up: "cron expression"` to agent YAML |
 | "Debug why agent X isn't called" | Check `can_call` conditions, verify `calling_agent_response` fields match, check `communication_type` |
 | "Validate my config" | POST the config to `/api/yaml/validate` or read `configs/config.yaml` and check structure |
-| "Add a Super-Agent" / "this task needs multi-step planning + verification" | Set `super_agent: true` on an LLM agent in YAML; add `super_agent_cost_ceiling`, `super_agent_step_cap`, `super_agent_reflection_budget`, `synth_max_tokens_floor`, `synth_max_tokens_ceiling`. See [Super-Agent v3](#super-agent-v3) section. Use it when the task is genuinely multi-step (research synthesis, multi-file edits, multi-page analysis) — for one-shot tasks, plain LLM agent is faster + cheaper |
+| "Add a Super-Agent" / "this task needs multi-step planning + verification" | Set `super_agent: true` (on, defaults) or a **dict** to tune it: `super_agent: {cost_ceiling, wall_clock, synth_max_tokens, step_concurrency, …}` (2.4.123+; the dict is the only tuning path — flat `super_agent_*` keys and `LEAFMESH_SUPER_AGENT_*` env vars are dead). See [Super-Agent v3](#super-agent-v3) section. Use it when the task is genuinely multi-step (research synthesis, multi-file edits, multi-page analysis) — for one-shot tasks, plain LLM agent is faster + cheaper |
 | "Add Skills" / "give this agent reusable playbooks" | Add `skills: {sourceName: "...", enabled: true, names: [...]}` on the agent. **Local `.md` files are NOT auto-loaded** — the default source is hosted (Redis). For filesystem skills, register a source via `POST /api/skills/sources` first. See [Skills System](#skills-system) section |
 | "Retry when X fails" / "loop back to re-do upstream work" | NEVER write an unbounded retry back-edge. Add a per-session exhaustion counter in the agent's Python, yield a `*_retry_exhausted` boolean, gate the back-edge on it, add a terminal route. See [Rule 3](#rule-3--bound-every-retry-back-edge) |
 | "Use Grok or Mistral as the model" | Set `model: "grok-2"` (or `grok-3`, `grok-beta`) and `XAI_API_KEY` env var; or `model: "mistral-large"` (or `mistral-small`, `mixtral-8x22b`, `codestral-latest`) and `MISTRAL_API_KEY` env var. Both are native providers — no Bedrock/Vertex routing needed |
@@ -151,9 +196,14 @@ How to merge: the surviving agent takes the union of yields, the
 union of responsibilities in its prompt/module (sequenced stages),
 and the union of outbound edges. An LLM role absorbs deterministic
 responsibilities into its module post-processing — never the reverse
-(judgment never moves into a programmatic agent). One `wake_up` per
-agent: cron responsibilities merge only when one schedule can carry
-both.
+(judgment never moves into a programmatic agent). Since 2.4.107 one
+agent can hold MULTIPLE wake_up schedules, each with its own `input`
+({cron, input} list entries) — so cron responsibilities that share an
+agent's role no longer need to share one schedule; distinct schedules
+with distinct inputs beat one overloaded cron. Since 2.4.124 crons
+run in the agent's `timezone:` (default UTC; per-entry `timezone`
+overrides per schedule) — always set it when the schedule means a
+LOCAL time of day.
 
 **What is NEVER merged — roles are not the only thing in a mesh.
 Controls stay separate at any cost:**
@@ -270,7 +320,12 @@ hitl_stub_receiver.py  <- Webhook stub for testing HITL locally
 
 **Auto-discovery**: The SDK matches Python function names to YAML agent names. `greeter_agent()` in `agency/greeter_agent.py` binds to the `greeter_agent:` block in `config.yaml`.
 
-**Execution flow**: Entry point -> agent function runs -> SDK handles mesh communication (can_call), session state, Redis persistence, and observability automatically.
+**Execution flow**: Entry point -> agent function runs -> SDK handles mesh communication (can_call), session state, persistence, and observability automatically.
+
+**Persistence is a deployment choice, not a code one.** The same agency runs on
+Redis or on Postgres — `persistence: backend: redis` (default) or
+`backend: postgres`. Nothing in your agents or YAML changes between them, so
+never write agent code that assumes Redis.
 
 ## Core SDK Pattern
 
@@ -374,7 +429,7 @@ result = await sdk.rerun_agent(
 ```
 
 ```bash
-# HTTP — same primitive, for non-Python clients (e.g. ADK Studio rerun button)
+# HTTP — same primitive, for non-Python clients (e.g. LeafCraft Studio rerun button)
 curl -X POST http://127.0.0.1:18820/api/sessions/sess-123/agents/advisor_agent/rerun \
   -H "Content-Type: application/json" \
   -d '{"feedback": {"error": "lacks specifics"}, "reason": "user_request"}'
@@ -400,7 +455,7 @@ When `new_input` is omitted, the SDK pulls the agent's most recent stored input 
 | `programmatic` | Deterministic logic, API calls, data transforms | No | Yes (with connector) | Data processing, Zapier/n8n actions |
 | `external` | Wrap existing framework (CrewAI, LangGraph, n8n, etc.) | Varies | Yes (with connector) | Framework integration |
 
-All agent types work from pure YAML. For programmatic and external agents, a connector (`integration` or `framework` + `connector_config`) can be the entire execution engine -- no Python code needed. The connector response is returned as-is. Optionally add `@sdk.intelligence()` to post-process the connector result.
+All agent types work from pure YAML. For programmatic and external agents, a connector (`integration` or `framework` + `connector_config`) can be the entire execution engine -- no Python code needed. The connector response is returned as-is. Optionally add `@sdk.intelligence("agent_name")` to post-process the connector result (the decorator takes the agent name as a required argument — `@sdk.intelligence()` with no name will not register).
 
 Super-Agent is **opt-in** on an LLM agent — set `super_agent: true` and the SDK wraps the agent in the plan → execute → verify → reflect → finalize orchestrator (§[Super-Agent v3](#super-agent-v3)). For one-shot tasks, leave it off — a plain LLM agent is faster and cheaper.
 
@@ -442,13 +497,16 @@ agents:
   research_synthesiser:
     agent_type: "llm"
     model: "claude-sonnet-4-6"
-    super_agent: true                       # the on-switch
-    super_agent_cost_ceiling: 100000        # hard ceiling on aggregate token cost for one run
-    super_agent_step_cap: 12                # max executable steps before hard-stop
-    super_agent_reflection_budget: 2        # max reflect-then-amend cycles per run
-    super_agent_wall_clock: 900             # per-agent wall-clock seconds (15 min)
-    synth_max_tokens_floor: 16384           # lower bound on synthesis call's max_tokens (Anthropic non-streaming guardrail)
-    synth_max_tokens_ceiling: 32768         # upper bound for cost protection
+    super_agent:                            # DICT form = the tuning path (2.4.123+); the ONLY way to tune it
+      cost_ceiling: 100000                  # aggregate token budget per run (default 50000)
+      wall_clock: 900                       # per-run wall-clock seconds (default 600)
+      synth_max_tokens: 32768               # cap on the final synthesis call
+      goal_check_view_chars: 12000          # chars the goal-check phase sees (default 12000)
+      step_concurrency: 4                   # parallel plan steps when the DAG allows
+    # super_agent: true is the shorthand — on with all defaults.
+    # NOTE: the old FLAT keys (super_agent_cost_ceiling, super_agent_step_cap,
+    #       synth_max_tokens_floor, …) were never wired — do not use them; and
+    #       the LEAFMESH_SUPER_AGENT_* env vars are dead as of 2.4.131.
     prompt: |
       You are a research synthesiser. ...
     yields:
@@ -475,8 +533,7 @@ Every Super-Agent span carries an *informative* output attribute (not just `ok` 
 ### Honest caveats
 
 - Orchestration overhead is real — plan + verify + reflect are additional LLM calls per run. Don't enable for one-shot work.
-- The synthesis call's `max_tokens` floor matters on Anthropic non-streaming — without `synth_max_tokens_floor`, Anthropic silently truncates outputs that exceed an internal guardrail. Set the floor explicitly for any task that produces > 8K-output.
-- `super_agent_cost_ceiling` is a hard stop. Once aggregate token cost crosses the ceiling, the run cancels and stamps a `cost_ceiling.exceeded` event. Pick the ceiling based on the task's realistic worst case, not the average.
+- **Tune with the dict form, not flat keys.** As of 2.4.123 `super_agent:` takes a bool *or* a dict, and as of 2.4.131 the **dict is the only tuning path** — `super_agent: {cost_ceiling, wall_clock, step_max_tokens, synth_max_tokens, verify_view_chars, goal_check_view_chars, step_concurrency}` (defaults: `cost_ceiling` 50000, `wall_clock` 600, `goal_check_view_chars` 12000). The old **flat** `super_agent_*` / `synth_max_tokens_*` keys were never wired, and the `LEAFMESH_SUPER_AGENT_*` env vars are dead — don't use either.
 
 ## Skills System
 
@@ -588,18 +645,67 @@ The LLM first calls `load_skill_reference("refund_flow")` for the primary body, 
 
 A compromised skill body cannot do more than produce bad text, which the Summarizer + yields contract are designed to catch. A compromised tool can have real-world side effects.
 
+## Command Center (the business board)
+
+The agency designs its own business KPI board by watching what its agents
+actually do. **You do not write the metrics** — that is the whole point. It
+watches a few real runs, infers what this agency exists to achieve, and derives
+the numbers from real outcomes rather than from the config.
+
+```yaml
+manager:
+  command_center:
+    enabled: true
+    design_after_runs: 3     # runs to observe before designing (1–50)
+    max_metrics: 24
+    model: null              # defaults to the manager's model
+```
+
+What this means when you are building an agency:
+
+- **Name yields in business language.** The board is derived from what agents
+  yield and which tools they run. `status: "settled"` and `claim_value` produce
+  a board about claims; `output_1` and `flag_2` produce nothing anyone can read.
+  This is the single biggest thing you control.
+- **Nothing is pre-built.** There is no default metric set to switch on, and no
+  template. An empty-looking board early on means it has not seen enough work
+  yet, not that something is broken.
+- **Work done before the board exists is not lost.** Events are buffered and
+  replayed at their original timestamps once the schema lands.
+- **The board is business, never machinery.** It talks about invoices, tickets
+  and cases — not agents, tokens or queues. Do not try to make it show
+  operational metrics; the dashboards already do that.
+- **Operators can edit, export and re-import it**, and ask for a redesign in
+  plain words when the business changes what matters.
+
+## Image generation
+
+An agent that produces images picks an image model the same way any other agent
+picks a text one. Routing and capability checks are handled for you — an image
+model is never selected for a text agent, or the reverse.
+
+```yaml
+  - name: creative_agent
+    agent_type: llm
+    model: gemini-3-pro-image
+```
+
+Available: `gemini-3-pro-image`, `gemini-2.5-flash-image` (Google);
+`gpt-image-1`, `dall-e-3`, `dall-e-2` (OpenAI); Imagen 3 (Vertex);
+Titan Image Generator v2, Nova Canvas, Stable Diffusion XL (Bedrock).
+
 ## STRICT — fields by `agent_type`
 
 YAML load rejects fields that don't apply to the declared `agent_type`. Set only the fields that match.
 
 | `agent_type` | Allowed type-specific fields |
 |---|---|
-| `llm` | `model`, `prompt`, `temperature`, `max_tokens`, `max_completion_tokens`, `reasoning`, `thinking`, `reasoning_budget` (`thinking_budget` is a deprecated alias), `enable_prompt_caching`, `response_format`, `optimization_strategy`, `context_parts`, `tools`, `tool_choice`, `max_tool_calls_per_message`, `tool_call_timeout`, `allow_parallel_tool_calls`, `tool_categories`, `skills`, `super_agent`, `super_agent_cost_ceiling`, `super_agent_step_cap`, `super_agent_reflection_budget`, `super_agent_wall_clock`, `synth_max_tokens_floor`, `synth_max_tokens_ceiling`, `effort` |
+| `llm` | `model`, `prompt`, `temperature`, `max_tokens`, `max_completion_tokens`, `reasoning`, `thinking`, `reasoning_budget`, `thinking_budget` (legacy, still declared), `enable_prompt_caching`, `response_format` (accepted extra), `optimization_strategy`, `context_parts`, `tools`, `tool_choice`, `max_tool_calls_per_message`, `tool_call_timeout`, `allow_parallel_tool_calls`, `tool_categories`, `skills`, `super_agent`, `effort`, `receive_conversation_history`, `history_limit`, `stream_yield`, `llm_hard_timeout_s`, `response_overrides` — (tune `super_agent` via its **dict** form, e.g. `super_agent: {cost_ceiling, wall_clock, …}`, not flat `super_agent_*` keys) |
 | `human` | `human_interface`, `human_timeout_seconds`, `human_context_template`, `human_prompt_template`, `fallback_on_timeout`, `fallback_response`, `require_human_confirmation`, `human_escalation_triggers`, `operator_ids`, `webhook_config`, `channels` |
 | `external` | `framework` (**required**), `connector_config` |
 | `programmatic` | `integration`; `connector_config` allowed only when `integration` is set |
 
-**Universal fields** (any type): `name`, `description`, `agent_type`, `communication_type`, `parallel`, `max_concurrent`, `wake_up`, `yields`, `inputs`, `can_call`, `narration`, `wait_for`, `wait_for_timeout`, `auto_store_response`, `auto_store_yields`, `enforce_yields`, `enforce_yields_retry`, `memory`, `knowledge`, `skills`, `listen_events`.
+**Universal fields** (any type): `name`, `description`, `agent_type`, `communication_type`, `parallel`, `max_concurrent`, `wake_up`, `wake_up_input`, `timezone`, `yields`, `inputs`, `can_call`, `narration`, `wait_for`, `wait_for_timeout`, `auto_store_response`, `auto_store_yields`, `enforce_yields`, `enforce_yields_retry`, `memory`, `knowledge`, `skills`, `listen_events`.
 
 **Do not set `is_human_powered` manually** — it's auto-derived from `agent_type` and is silently overwritten by the validator.
 
@@ -609,9 +715,9 @@ A human agent picks **exactly one** interface. The fields below depend on which 
 
 | `human_interface` | Path | Required fields | Forbidden together |
 |---|---|---|---|
-| `default` | ADK-Frontend HITL inbox (hosted only) | none | do NOT set `webhook_config` or `channels` — they're ignored at runtime |
+| `default` | hosted HITL inbox (LeafCraft Studio) (hosted only) | none | do NOT set `webhook_config` or `channels` — they're ignored at runtime |
 | `webhook` | Outbound HTTP / channel adapters | `webhook_config.outbound_url` OR `channels` (one is enough) | — |
-| `api` / `custom` | Python callback registered via `sdk.register_human_handler()` | none | do NOT set `webhook_config` or `channels` |
+| `api` / `custom` | Python callback registered via `sdk.agent_registry.register_human_agent(name, human_interface_handler=fn)` (there is **no** `sdk.register_human_handler()`) | none | do NOT set `webhook_config` or `channels` |
 
 `channels` only fires when `human_interface: webhook`. Setting `channels` with `default` or `api` is silently ignored at runtime — don't do it.
 
@@ -652,7 +758,7 @@ agents:
 
     can_call:
       - agent: "greeter_agent"
-        condition: "not calling_agent_response.from_agent"
+        condition: "not calling_agent_response.from_agent"   # works ONLY because human agents ALWAYS emit from_agent (maybe ""). Never `not` a field that can be absent — see gotcha #14
       - agent: "processor_agent"
         condition: "calling_agent_response.from_agent == 'greeter_agent'"
 
@@ -666,7 +772,7 @@ entry_points:
     target: "client"
 ```
 
-#### Option B — `human_interface: default` (ADK-Frontend HITL inbox, hosted only)
+#### Option B — `human_interface: default` (hosted HITL inbox (LeafCraft Studio), hosted only)
 
 > Inbox shape: `GET /api/sessions/hitl` returns **one record per
 > session** with every pending ask nested in `requests[]`
@@ -684,7 +790,7 @@ agents:
     # NO webhook_config, NO channels — they're ignored on this interface
     can_call:
       - agent: "greeter_agent"
-        condition: "not calling_agent_response.from_agent"
+        condition: "not calling_agent_response.from_agent"   # works ONLY because human agents ALWAYS emit from_agent (maybe ""). Never `not` a field that can be absent — see gotcha #14
       - agent: "processor_agent"
         condition: "calling_agent_response.from_agent == 'greeter_agent'"
     yields: {request_data: "object"}
@@ -703,7 +809,7 @@ agents:
     # NO webhook_config, NO channels
     can_call:
       - agent: "greeter_agent"
-        condition: "not calling_agent_response.from_agent"
+        condition: "not calling_agent_response.from_agent"   # works ONLY because human agents ALWAYS emit from_agent (maybe ""). Never `not` a field that can be absent — see gotcha #14
     yields: {request_data: "object"}
     inputs: {user_message: "string"}
 ```
@@ -712,7 +818,10 @@ agents:
 # Register the Python handler for human_interface: api
 async def my_human_handler(context, session_id, timeout):
     return {"human_decision": "approved", "human_message": "Looks good"}
-sdk.register_human_handler("client", my_human_handler)
+# The real API (verified as of 2.4.104) — there is NO sdk.register_human_handler():
+sdk.agent_registry.register_human_agent("client", human_interface_handler=my_human_handler)
+# Or, to attach a handler to an already-declared human agent:
+# sdk.agent_registry.update_human_interface_handler("client", my_human_handler)
 ```
 
 ### HITL Scenarios
@@ -824,9 +933,10 @@ agents:
     # Tools
     tools: ["word_count", "timestamp"]
     tool_categories: ["data", "utility"]
-    # tool_choice: leave unset for framework default — when runtime tools
-    # (memory/knowledge/CoT scaffolding) are configured, the framework
-    # promotes to 'required' on the first iteration so they actually fire.
+    # tool_choice: defaults to the string "auto" (never "unset") — when runtime
+    # tools (memory/knowledge/CoT scaffolding) are configured, the framework
+    # auto-promotes "auto" -> "required" on the first iteration so they fire.
+    # Leave at "auto" unless you must force "required"/"none".
     max_tool_calls_per_message: 5
     allow_parallel_tool_calls: true
     tool_call_timeout: 30
@@ -839,6 +949,7 @@ agents:
     parallel: true                 # Parallel execution
     max_concurrent: 3              # Max concurrent invocations
     wake_up: "0 9 * * *"          # Cron schedule
+    timezone: "Asia/Kolkata"       # 2.4.124+ — cron zone; OMIT = UTC (9:00 UTC != 9:00 local!)
     optimization_strategy: "performance"  # performance | cost | speed
 
     # Structured output — force LLM to respond with valid JSON schema
@@ -938,7 +1049,7 @@ agents:
   # ── Human Agent — default (inbox) interface — hosted only ──
   # reviewer_inbox:
   #   agent_type: "human"
-  #   human_interface: "default"      # writes only to ADK-Frontend HITL inbox
+  #   human_interface: "default"      # writes only to hosted HITL inbox (LeafCraft Studio)
   #   communication_type: "dual"
   #   human_timeout_seconds: 300
   #   # NO webhook_config, NO channels — runtime ignores them
@@ -969,7 +1080,7 @@ can_call:
   - agent: "escalation"
     condition: "calling_agent_response.priority == 'high'"
   - agent: "greeter"
-    condition: "not calling_agent_response.from_agent"   # Falsy check
+    condition: "not calling_agent_response.from_agent"   # works ONLY because human agents ALWAYS emit from_agent (maybe ""). Never `not` a field that can be absent — see gotcha #14   # Falsy check
   - agent: "processor"
     condition: "calling_agent_response.from_agent == 'greeter_agent'"
   - agent: "default"
@@ -1231,7 +1342,8 @@ def format_md(items: list) -> str:
 
 ```yaml
 manager:
-  enabled: true
+  # on by default — omit `enabled` (set `enabled: false` only to kill
+  # coordination + the summarizer entirely; rare)
   model: "gpt-4o-mini"          # Summarizer model
   domain: "generic"              # generic | ecommerce | data_analysis
   routing:
@@ -1340,6 +1452,7 @@ async def my_agent(llm_response, input_data, context):
 
 ## Additional Resources
 
+- **[building-agents-thoroughly.md](building-agents-thoroughly.md)** — **The direction — how Claude should build an agent and a mesh thoroughly.** Read alongside `agency-development.md`. Part A: the agent, built thoroughly (four stages, three instruction layers + the pairing rule, tools/identity-from-code, truth protocols, where data lives, the registered/permitted/offered/called verification layers, boundary-shipping, and the finished-agent checklist). Part B: the mesh, from the expense-reimbursement pod (coordinator + specialists + finisher, one-human-one-agent-one-system, default-deny, WORM, the finisher pattern). Part C: **client intake + provisioning** — inventory → membership bar → cast → connectors → **"no backend → provision Supabase"** (identity/domain/ledger/storage mapping) → controls + verification.
 - **[agency-development.md](agency-development.md)** — **The method for building a whole agency (template) end-to-end.** Read this FIRST when starting or elevating a template: the seven first principles, the nine-phase process (story → cast roles → draw flow → YAML-vs-Python → decorators → connectors → controls → verify → document), the agent-type & decorator decision tables, the mesh boundary for external parties, the verification doctrine (config-load ≠ runtime proof), the adversarial self-check, and the anti-patterns. SKILL.md tells you which field does what; this tells you how to think and in what order.
 - **[agent-config-fields.md](agent-config-fields.md)** — **Authoritative field reference for every YAML field**. Lists every option for every agent type (`llm`, `human`, `external`, `programmatic`), plus `WebhookConfig`, `ChannelConfig`, `Memory`, `EscalationConfig`, `EscalationTarget`, `LeafMeshConfig`, `ManagerConfig`, `MeshConfig` (Bedrock / Vertex / Foundry / Local), `RedisConfig`, `EvolutionConfig`, `DataStructure`, `Entry Points`, all per-framework `connector_config` schemas, and the **Field Applicability by Agent Type** matrix. Read this file when in doubt about any field, accepted values, default, or what's allowed where.
 - **[reference.md](reference.md)** — SDK Python API (`sdk.start()`, `sdk.mesh_call()`, `@global_tool`, decorators, error classes, env vars, etc.).
@@ -1347,1743 +1460,10 @@ async def my_agent(llm_response, input_data, context):
 
 > When the user asks "what fields can I put on a programmatic agent?" / "what's the default for `temperature`?" / "what does `wait_for: A AND B?` mean?" / "how do I configure n8n callback mode?" / "what fields does `EscalationTarget` accept?" — the answer lives in **agent-config-fields.md**. Don't guess; quote the file.
 
-
 ---
 
-# Complete Agent Config Field Reference
+## Field reference
 
-_Inlined from `agent-config-fields.md` — every field, every default, every allowed value._
+The complete field reference — every field, type, default, and accepted value for every agent type and config object — lives in its own file: **[agent-config-fields.md](agent-config-fields.md)**. Read it there.
 
-This document lists every configuration field, its type, default value, and accepted values. Use this to build frontend forms, dropdowns, and validation.
-
----
-
-
-## Agent Types
-
-| Value | Description |
-|-------|-------------|
-| `llm` | LLM-powered agent (default). Executes via OpenAI, Claude, Bedrock, Vertex, or Foundry. |
-| `human` | Human operator agent. Routes to a person via API, webhook, or channel. |
-| `programmatic` | Python function with business logic. No LLM calls. |
-| `external` | Delegates to an external framework (CrewAI, LangGraph, AutoGen, etc.). |
-
----
-
-## AgentConfig — Core Fields (All Types)
-
-These fields apply to every agent regardless of `agent_type`.
-
-| Field | Type | Default | Accepted Values | Required | Description |
-|-------|------|---------|-----------------|----------|-------------|
-| `name` | string | — | any string | **yes** | Unique agent name within the mesh |
-| `description` | string | `null` | any string | no | Agent description and purpose |
-| `agent_type` | string | `"llm"` | `llm`, `human`, `programmatic`, `external` | no | Agent execution type (see note below) |
-| `communication_type` | string | `"dual"` | `dual`, `chain`, `execute` | no | How agent communicates with the mesh |
-| `parallel` | bool | `false` | `true`, `false` | no | Enable parallel processing |
-| `max_concurrent` | int | `null` | 1 – unlimited | no | Max concurrent calls when `parallel: true` (null = unlimited) |
-| `wake_up` | string | `null` | cron expression (e.g. `"0 9 * * *"`) | no | Schedule for periodic wake-up |
-| `listen_events` | list | `[]` | list of [`EventListener`](#event-listeners--brd-021-kafka--sqs--mqtt--redis-streams--imap) entries | no | Bind agent to external event sources (Kafka, SQS, MQTT, Redis Streams, IMAP). Each entry references a broker from the top-level `brokers:` block. Parallel to `wake_up` — both are agent-level trigger surfaces |
-| `yields` | dict | `{}` | key: field name, value: type string or nested object | no | Output schema — what agent produces |
-| `inputs` | dict | `{}` | key: field name, value: type string or nested object | no | Input schema — what agent expects |
-| `can_call` | list | `[]` | list of `{"agent": "name"}` or `{"agent": "name", "condition": "expr"}` | no | Agents this agent can invoke |
-| `narration` | string | `null` | any string (multiline supported) | no | Plain-English routing hints for the Manager — evaluated by the Summarizer when conditions don't cover everything (see [Narration Routing](#narration-routing)) |
-| `wait_for` | string or list | `[]` | agent names or expression string | no | Fan-in/join condition |
-| `wait_for_timeout` | int | `60` | 1 – unlimited (seconds) | no | Hard timeout for fan-in |
-| `auto_store_response` | bool | `true` | `true`, `false` | no | Auto-store responses in Redis |
-| `auto_store_yields` | bool | `true` | `true`, `false` | no | Auto-store yields in Redis |
-| `memory` | bool or dict | `false` | `true`, `false`, or memory config dict | no | Agent memory — see [Memory Config](#memory-config) |
-| `memory_limit` | int | `10` | 1 – 100 | no | Legacy: max recent feed posts (use `memory.limit` instead) |
-| `knowledge` | bool or dict | `false` | `false`, or `{serviceName, enabled, groupName}` | no | Knowledge/RAG — see [Knowledge Config](#knowledge-config) |
-| `enforce_yields` | bool | `false` | `true`, `false` | no | Strictly validate this agent's output against the declared `yields:` schema. `false` (default) fills missing keys with type defaults and logs warnings; `true` triggers a Manager-driven retry up to `enforce_yields_retry` times, then escalates. See [Yields Enforcement](#yields-enforcement). |
-| `enforce_yields_retry` | int | `0` | 0 – unlimited | no | Maximum self-correction attempts when `enforce_yields: true`. `0` fails on first contract violation. Each retry passes the previous output + validation errors as feedback so LLM/external/human/programmatic agents can self-correct. Honored by every agent type. |
-
-### Yields Enforcement
-
-`enforce_yields` and `enforce_yields_retry` work together to make `yields:` an enforceable contract on the producer side, without coupling agents to each other's shapes.
-
-**Default behavior (`enforce_yields: false`)** — lenient mode, backwards-compatible:
-
-- Missing yield keys → filled with type defaults (`""`, `0`, `[]`, `{}`, `false`).
-- Type mismatches → kept verbatim, WARNING logged.
-- `can_call` conditions evaluate on a known shape (no more silent skips on undefined keys).
-- **Exception — dual-callback republishes get NO default-filling**: when
-  a `dual` agent's downstream response is republished as the origin's
-  output, the responder's payload doesn't owe the caller's contract, so
-  missing keys (booleans included) stay missing and conditions on them
-  fail closed (route skipped). Always explicitly yield every field a
-  downstream condition reads.
-
-**Strict mode (`enforce_yields: true`)** — for production-critical agents:
-
-- On contract violation, the SDK fires a Manager-driven retry through `Manager.execute_state(...)`.
-- Up to `enforce_yields_retry` attempts. Each retry sees the previous (wrong) output + validation errors as `_rerun_context`:
-  - **LLM agents** — prompt builder appends a correction note.
-  - **Human agents** — outbound payload exposes `_rerun_context`; inbox/channel UI surfaces what's needed.
-  - **External connectors** — `data._rerun_context` is added to the workflow payload.
-  - **Programmatic agents** — `input_data._rerun_context` is available alongside the (possibly Summarizer-corrected) inputs.
-- After the retry budget is exhausted, fires `AGENT_ERROR` with `error_type="YieldContractFailure"` + `retry_exhausted=true`. Routes through `manager.escalation:` if configured.
-
-**Example:**
-
-```yaml
-agents:
-  client:
-    agent_type: human
-    human_interface: webhook
-    yields:
-      request_data: object
-      decision: string
-    enforce_yields: true        # strict
-    enforce_yields_retry: 3     # 3 self-correction attempts before escalating
-```
-
-**Programmatic agents are retryable too** — the Summarizer can inspect the failure and produce a `corrected_input` (e.g. fix `"ORGANIZATION"` → `"Organization"`). The retry runs the same deterministic function with the corrected input and produces a different result. See [Manager — Rerun Flow](../core-concepts/manager#rerun) for the full path.
-
-### Changing `agent_type`
-
-You can change an agent's type via `PATCH /api/yaml/agents/{name}`. When `agent_type` changes, the ADK automatically **removes fields that don't belong to the new type**:
-
-| Switching away from... | Fields removed |
-|------------------------|----------------|
-| `llm` | `model`, `prompt`, `temperature`, `max_tokens`, `max_completion_tokens`, `reasoning`, `thinking`, `reasoning_budget` (and legacy `thinking_budget`), `tools`, `tool_categories`, `context_parts`, `tool_choice`, `response_format` |
-| `human` | `webhook_config`, `human_interface`, `human_timeout_seconds`, `channels`, `is_human_powered` |
-| `external` | `framework`, `connector_config` |
-| `programmatic` | `integration` |
-
-This prevents stale configuration from the old type interfering with the new type's execution.
-
-### `yields` and `inputs` Type Strings
-
-Values can be a simple type string (flat field) or a nested object definition.
-
-**Flat fields** — value is a type string:
-
-| Type String | Description |
-|-------------|-------------|
-| `"string"` | Text value |
-| `"number"` | Numeric value |
-| `"boolean"` | True/false |
-| `"list"` | Array/list |
-| `"object"` | Dictionary/object (unstructured) |
-
-**Nested fields** — value is an object with `type` and `fields`:
-
-```yaml
-inputs:
-  # Flat fields
-  name: string
-  email: string
-
-  # Nested object with defined sub-fields
-  arguments:
-    type: object
-    fields:
-      summary: string
-      start_datetime: string
-      end_datetime: string
-      timezone: string
-
-yields:
-  # Flat
-  status: string
-
-  # Nested
-  data:
-    type: object
-    fields:
-      result: string
-      metadata: object
-```
-
-When a field uses the nested format, the frontend renders individual sub-field editors instead of a single text input. This is useful for external framework integrations (Composio, Zapier, etc.) where the request body has a known structure.
-
-### `wait_for` Expression Syntax
-
-```yaml
-# Simple list — all required (AND)
-wait_for:
-  - agent_a
-  - agent_b
-
-# Expression strings
-wait_for: "agent_a AND agent_b"                            # Wait for both
-wait_for: "agent_a OR agent_b"                             # Wait for first
-wait_for: "agent_a AND agent_b?"                           # agent_b is optional (? suffix)
-wait_for: "agent_a AND (agent_b OR agent_c)"               # Nested logic
-wait_for: "agent_a AND (agent_b OR agent_c) AND agent_d?"  # Complex expression
-```
-
-### `can_call` Format
-
-```yaml
-# Simple
-can_call:
-  - agent: "next_agent"
-
-# With condition
-can_call:
-  - agent: "next_agent"
-  - agent: "conditional_agent"
-    condition: "calling_agent_response.status == 'ready'"
-```
-
-### Narration Routing
-
-`narration` is an agent-level field for routing hints you **can't express as conditions**. Conditions handle definitive routes ("if category is billing, call billing_agent"). Narration handles non-definitive routes ("if the customer sounds frustrated and mentions cancelling, maybe call retention_agent").
-
-```yaml
-agents:
-  triage:
-    yields:
-      category: "string"
-      urgency: "number"
-    can_call:
-      - agent: "billing_agent"
-        condition: "category == 'billing'"
-      - agent: "technical_agent"
-        condition: "category == 'technical'"
-    narration: >
-      If the customer mentions cancelling their subscription, route to retention_agent.
-      If the customer mentions a competitor by name, route to win_back_agent.
-      If the customer asks about enterprise plans, route to sales_agent.
-```
-
-**How it works:**
-
-1. Conditions are evaluated first by the control plane (AST, instant, deterministic)
-2. Condition targets are dispatched immediately
-3. The Summarizer — which already analyzes every agent output via LLM — sees the narration in its prompt context
-4. The Summarizer's `next_agents` recommendation now reflects both condition-routed agents and narration-suggested agents
-5. The Manager compares `next_agents` against what conditions already dispatched, and calls the difference
-
-**Key rules:**
-
-- Conditions are the authority — narration never overrides a condition result
-- Narration targets are **additive** — they add to condition targets, never remove
-- Narration can reference **any agent** in the mesh, not just those in `can_call`
-- No narration = zero overhead (the Summarizer's prompt is unchanged)
-- If the Manager is disabled, narrations are ignored
-
-See **[Manager — Narration Routing](../core-concepts/manager#narration-routing)** and **[Message Routing](../messages/routing#narration-routing)** for the full flow.
-
-### Knowledge Config
-
-`knowledge` enables RAG-powered context injection from a vector database. The agent gets both pre-call injection (automatic) and a `query_knowledge` tool (on-demand) — same dual pattern as memory.
-
-```yaml
-agents:
-  support_agent:
-    knowledge:
-      serviceName: "mongo_main"
-      enabled: true
-      groupName: "product_docs"
-```
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `serviceName` | string | yes | — | Provider name (configured via Knowledge API, stored in Redis) |
-| `enabled` | bool | no | `true` | Enable/disable knowledge for this agent |
-| `groupName` | string | no | `null` | Query a specific group. Omit to query all groups. |
-
-**Key points:**
-
-- Provider connection details (connection strings, API keys, embedding model) are configured via the Knowledge API, not in YAML
-- When enabled, both retrieval paths are active automatically — no mode flag
-- `query_knowledge` tool is stripped from agents without knowledge enabled
-- The Manager can also have knowledge for SOP awareness (configured under `manager.knowledge`)
-
-See **[Manager — Narration Routing](../core-concepts/manager#narration-routing)** for how knowledge integrates with the Summarizer.
-
----
-
-## LLM Agent Fields (`agent_type: "llm"`)
-
-These fields are used when `agent_type` is `"llm"`. Ignored for other types.
-
-| Field | Type | Default | Accepted Values | Description |
-|-------|------|---------|-----------------|-------------|
-| `model` | string | `"gpt-4o-mini"` | see [Model List](#model-list) below | LLM model name |
-| `prompt` | string | `null` | any string (multiline supported) | System prompt |
-| `temperature` | float | `0.1` | `0.0` – `2.0` | LLM temperature (creativity/randomness) |
-| `max_tokens` | int | `800` | 1 – model max | Max output tokens (legacy models) |
-| `max_completion_tokens` | int | `null` | 1 – model max | Max completion tokens (o1, gpt-5.x models) |
-| `thinking` | bool | `false` | `true`, `false` | Enable SDK chain-of-thought scaffolding tools (works with any model). **Was `reasoning` pre-v2.2.24** |
-| `reasoning` | bool | `false` | `true`, `false` | Enable provider-native extended thinking/reasoning (requires a reasoning-capable model — see below). **Was `thinking` pre-v2.2.24** |
-| `reasoning_budget` | int | `null` | 1024 – 32768 (tokens) | Max native reasoning tokens. Provider defaults apply when omitted. `thinking_budget` is a deprecated alias (silently migrated) |
-| `enable_prompt_caching` | bool | `false` | `true`, `false` | Enable provider-native prompt caching for cost reduction (see below) |
-| `response_format` | dict | `null` | JSON Schema object | Structured output — forces LLM to respond with valid JSON matching this schema |
-| `optimization_strategy` | string | `null` | `performance`, `cost`, `speed` | Per-agent model selection strategy |
-| `context_parts` | dict | `null` | see below | Optional context parts |
-| `tools` | list | `[]` | tool name strings | Available tools |
-| `tool_choice` | string | `"auto"` | `auto`, `none`, or specific tool name | Tool selection strategy |
-| `max_tool_calls_per_message` | int | `5` | 0 – 20 | Max tool calls per LLM message |
-| `tool_call_timeout` | float | `30.0` | 0.1 – 300 (seconds) | Tool execution timeout |
-| `allow_parallel_tool_calls` | bool | `true` | `true`, `false` | Allow parallel tool execution |
-| `tool_categories` | list | `[]` | category name strings | Tool categories agent can access |
-
-### `context_parts` Keys
-
-Each key is injected as a separate system message with a bracketed label, in the order below. Custom keys are also supported — they receive an auto-generated label from their name (`MY_KEY` → `[MY KEY]`).
-
-| Key | Label injected | Description |
-|-----|---------------|-------------|
-| `care` | `[EMPATHY & TONE]` | Warmth/empathy instructions — shapes how the agent expresses itself |
-| `sentiment_analysis` | `[SENTIMENT ANALYSIS]` | Tone detection instructions — tells the agent to read user mood |
-| `guardrails` | `[SAFETY GUARDRAILS]` | Safety and compliance rules — what the agent must never do |
-| `flows` | `[FLOW INSTRUCTIONS]` | **Per-caller routing behaviour** — what the agent should do differently depending on who called it and where in the mesh it is |
-
-Values are free text strings. All keys are optional — use any combination.
-
-```yaml
-context_parts:
-  care: |
-    Always respond with empathy. Acknowledge frustration before solving.
-  guardrails: |
-    Never share internal system details. No PII disclosure.
-  flows: |
-    When called from the entry point (no from_agent):
-      - This is a new user. Greet warmly and gather requirements.
-    When called from client (human agent):
-      - The human has already responded. Don't re-greet. Summarise and proceed.
-    When called from scheduler_agent:
-      - This is a scheduled run. Skip greeting, produce a structured summary.
-```
-
-### Model List
-
-> **Canonical source:** the live model catalog is
-> `leafmesh.llm.adaptive_executor.MODEL_DEFAULT_BENCHMARKS` (42 models,
-> incl. `claude-fable-5`), served at **`GET /api/registry`** (per-provider
-> `models` lists, plus connectors/integrations/channels). When in doubt,
-> hit the endpoint — don't guess. A model id that matches **no known
-> provider prefix and no catalog entry warns at load and silently routes
-> to the `local` provider** (it then fails at the first LLM call unless
-> you really run a local server) — typos like `gpt4o-mini` are the
-> classic case.
-
-**OpenAI:**
-- `gpt-4o-mini`, `gpt-4o`
-- `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano`
-- `gpt-5.1`, `gpt-5.2`, `gpt-5.3`, `gpt-5.5` (v2.3.x additions)
-- `o1`, `o1-mini`, `o3`, `o3-mini`, `o4-mini`
-
-**Anthropic:**
-- `claude-opus-4-6`, `claude-sonnet-4-6`
-- `claude-haiku-4-5-20251001`
-- `claude-opus-4-8` (v2.3.x — supports `effort: "low" | "medium" | "high"` parameter)
-
-**Google:**
-- `gemini-2.0-flash`, `gemini-2.5-pro`
-- `gemini-3` (v2.3.x — GA)
-
-**DeepSeek:**
-- `deepseek-chat`, `deepseek-reasoner`
-
-**xAI Grok (v2.3.x — native provider):**
-- `grok-2`, `grok-3`, `grok-beta`
-- Requires `XAI_API_KEY` env var
-- Supports tool calling; native chat-completions endpoint (no Bedrock routing)
-
-**Mistral (v2.3.x — native provider):**
-- `mistral-large`, `mistral-small`, `mistral-medium`
-- `mixtral-8x22b`, `mixtral-8x7b`
-- `codestral-latest`
-- Requires `MISTRAL_API_KEY` env var
-- Native chat + tools API (no Bedrock routing)
-
-**AWS Bedrock:**
-- Any Bedrock model ID (e.g. `anthropic.claude-3-sonnet-20240229-v1:0`, `amazon.titan-text-premier-v1:0`)
-- Requires `mesh.bedrock` config
-
-**Google Vertex AI:**
-- Any Vertex model ID (e.g. `gemini-1.5-pro`)
-- Requires `mesh.vertex` config
-
-**Azure Foundry:**
-- Any Azure deployment name
-- Requires `mesh.foundry` config
-
-**Local Models (vLLM, SGLang, Ollama, llama.cpp, etc.):**
-- Any model name supported by your local server
-- Requires `mesh.local` config (or `LOCAL_MODEL_ENDPOINT` env var)
-- See [LocalModelConfig](#localmodelconfig) for server setup
-
-### `reasoning` vs `thinking`
-
-Two **separate** features. **v2.2.24 SWAPPED these keys** — pre-v2.2.24
-configs (and older templates) have them backwards. Current meaning:
-
-| Feature | `thinking: true` | `reasoning: true` |
-|---------|-------------------|-------------------|
-| **What it does** | SDK injects chain-of-thought scaffolding tools (`chain_of_thought` + `metacognitive_reflection`) the LLM calls in-loop | Enables provider-native extended thinking/reasoning via the provider API |
-| **Works with** | Any model (tool injection) | Only reasoning-capable models: OpenAI o-series / gpt-5.x, Claude 3.7 / 4.x / 5.x, Gemini 2.5+ / 3.x, deepseek-reasoner, Grok |
-| **Token cost** | Tool call overhead — needs ≥ 1500 `max_tokens` headroom (warns below) | Dedicated reasoning tokens (billed as output); cap via `reasoning_budget` |
-| **Quality** | Good for structured multi-field revision | Best quality — model's internal reasoning |
-
-**Which to use when:** `thinking: true` for structured multi-step work
-on any model (including gpt-4o-mini). `reasoning: true` ONLY on a
-reasoning-capable model — setting it on e.g. `gpt-4o-mini` has no
-native-reasoning surface and **warns at boot** (the provider no-ops or
-rejects it). You can use both together on a reasoning-capable model.
-
-### Native Reasoning (`reasoning: true`) — Provider Support
-
-| Provider | Model Requirement | Behavior |
-|----------|------------------|----------|
-| **Anthropic** | Claude 3.7 / Sonnet 4.x / Opus 4.x–4.7 / Haiku 4.5+ | Extended thinking with `budget_tokens` (Opus 4.8+ uses `effort` instead — manual thinking is rejected) |
-| **OpenAI** | o-series, gpt-5.x | `reasoning_effort` parameter |
-| **Google** | Gemini 2.5+ (`thinkingBudget`), Gemini 3.x (`thinkingLevel`) | `thinkingConfig` |
-| **DeepSeek** | deepseek-reasoner | Native chain-of-thought (`reasoning_content`) |
-| **xAI Grok** | Grok reasoning models | `reasoning_effort` parameter |
-| **Bedrock** | Claude models on Bedrock | `additionalModelRequestFields.thinking` |
-| **Vertex** | Claude + Gemini on Vertex | Both thinking APIs supported |
-| **Foundry** | Azure o-series models | `reasoning_effort` parameter |
-| **Local** | Depends on model/server | Passthrough if server supports it |
-
-### Prompt Caching — Provider Support
-
-| Provider | How it works | Savings |
-|----------|-------------|---------|
-| **Anthropic** | `cache_control: ephemeral` on system prompt + tools | ~90% on cached reads |
-| **Bedrock** | `promptCaching` parameter | ~90% on cached reads |
-| **Vertex (Claude)** | `cache_control: ephemeral` on system prompt | ~90% on cached reads |
-| **OpenAI** | Automatic — no config needed (stats in response) | ~50% on cached |
-| **Google** | Context caching API (requires separate setup) | Varies |
-
-### `response_format` — Structured Output
-
-Forces the LLM to respond with valid JSON matching a JSON Schema. Supported across all providers — each provider translates the schema to its native structured output API.
-
-```yaml
-agents:
-  data_extractor:
-    agent_type: llm
-    model: gpt-4o
-    prompt: "Extract structured data from the user's message."
-    response_format:
-      type: json_schema
-      json_schema:
-        name: extracted_data
-        strict: true
-        schema:
-          type: object
-          properties:
-            name:
-              type: string
-            email:
-              type: string
-            priority:
-              type: string
-              enum: [low, medium, high]
-          required: [name, email, priority]
-          additionalProperties: false
-```
-
-| Provider | Native API used |
-|----------|----------------|
-| **OpenAI** | `response_format` parameter (structured outputs) |
-| **Anthropic** | Tool-based JSON extraction with schema |
-| **Google** | `response_schema` in generation config |
-| **DeepSeek** | `response_format` parameter |
-| **Bedrock** | Schema injected into system prompt |
-| **Foundry** | `response_format` parameter |
-| **Local** | `response_format` passthrough |
-
-### Example
-
-```yaml
-agents:
-  analyst:
-    agent_type: llm
-    model: claude-sonnet-4-6
-    reasoning: true             # provider-NATIVE extended thinking (claude-4 family supports it)
-    reasoning_budget: 8192      # max 8K native reasoning tokens
-    thinking: true              # also inject SDK chain-of-thought scaffolding tools
-    enable_prompt_caching: true # cache system prompt + tools
-    prompt: |
-      You are a data analyst. Analyze the provided data thoroughly.
-```
-
----
-
-## Human Agent Fields (`agent_type: "human"`)
-
-These fields are used when `agent_type` is `"human"`. `is_human_powered` is auto-set to `true`.
-
-| Field | Type | Default | Accepted Values | Description |
-|-------|------|---------|-----------------|-------------|
-| `is_human_powered` | bool | `false` | `true`, `false` | Auto-synced to `true` when agent_type="human" |
-| `human_interface` | string | `"api"` | `default`, `api`, `webhook`, `custom` | How human receives/submits input (see below) |
-| `human_timeout_seconds` | int | `300` | 1 – 3600 (seconds) | Human response timeout |
-| `human_context_template` | string | `null` | any string | Template for presenting context to human |
-| `human_prompt_template` | string | `null` | any string | Template for human prompts |
-| `fallback_on_timeout` | bool | `true` | `true`, `false` | Use fallback response when human doesn't respond |
-| `fallback_response` | dict | `null` | arbitrary JSON | Default response on human timeout |
-| `require_human_confirmation` | bool | `false` | `true`, `false` | Require approval before proceeding |
-| `human_escalation_triggers` | list | `[]` | free text strings | Conditions triggering human escalation |
-| `operator_ids` | list | `[]` | list of strings (email or ID) | Operators who can see this agent's HITL requests. Empty = broadcast (all operators see it). |
-| `webhook_config` | object | `null` | see [WebhookConfig](#webhookconfig) | Webhook settings (required for `webhook` interface) |
-| `channels` | dict | `{}` | see [ChannelConfig](#channelconfig) | Native channel adapters (Slack, Telegram, etc.) |
-
-### `human_interface` — Interface Types
-
-| Value | Description | How it works |
-|-------|-------------|-------------|
-| `default` | **ADK-Frontend HITL Inbox** (recommended) | Writes request to Redis, emits stream event. ADK-Frontend renders an inbox with conversation thread. Human replies via the UI. Supports parallel requests per session. |
-| `webhook` | **External webhook** | POSTs request to `webhook_config.outbound_url`. Human responds via inbound webhook endpoint. Also supports native channel adapters (Slack, Telegram, etc.). |
-| `api` | **Python callback** | Calls a Python handler registered via `sdk.register_human_handler()`. No outbound HTTP. Used for custom integrations and testing. |
-| `custom` | **Custom handler** | Same as `api` — uses the registered `human_interface_handler` callback. |
-
-> **Note:** `default` is only available on the LeafMesh hosted platform. For self-hosted deployments, use `webhook` with your own `outbound_url`, or `api` with a Python callback.
-
-### Example — Default (ADK-Frontend Inbox)
-
-```yaml
-agents:
-  support_human:
-    agent_type: human
-    human_interface: default          # ADK-Frontend inbox
-    human_timeout_seconds: 300
-    yields:
-      resolution: string
-      action_taken: string
-```
-
-### Example — Webhook with Channel Adapter
-
-```yaml
-agents:
-  support_human:
-    agent_type: human
-    human_interface: webhook
-    human_timeout_seconds: 600
-    webhook_config:
-      outbound_url: "https://my-app.com/api/human-requests"
-    channels:
-      slack:
-        bot_token: "${SLACK_BOT_TOKEN:}"
-        signing_secret: "${SLACK_SIGNING_SECRET:}"
-        post_channel: "C123456"
-```
-
-### Two Scenarios for Human Agent Sessions
-
-Human agents support two interaction patterns via the same webhook endpoint:
-
-**Scenario 1 — Resume (session_id present):** When a POST to `/webhook/{entry_point}` includes a `session_id` that matches a pending HITL request, the ADK resumes that session. The operator's response is routed via `can_call` to the next agent.
-
-**Scenario 2 — New (no session_id or not found):** When a POST has no `session_id` or the session has no pending expectation, the ADK creates a new workflow. If the human agent has no upstream caller, the operator's message is immediately routed via `can_call` — no HITL pending step is created.
-
----
-
-## External Agent Fields (`agent_type: "external"`)
-
-These fields are used when `agent_type` is `"external"`.
-
-| Field | Type | Default | Accepted Values | Required | Description |
-|-------|------|---------|-----------------|----------|-------------|
-| `framework` | string | `null` | `crewai`, `langgraph`, `autogen`, `a2a`, `mcp`, `zapier`, `composio`, `n8n`, `hermes`, `lyzr`, `writer`, `dify`, `flowise`, `voiceflow`, `cognigy`, `vellum`, `stackai`, `agentforce`, `watsonx`, `relevance`, `wordware`, `claude_agent`, `openai_agents`, `custom` | **yes** | External framework name |
-| `connector_config` | dict | `{}` | framework-specific key-values | no | Connection configuration — passed as `**kwargs` to the connector |
-
-> **One agent = one action/workflow.** Each agent targets one specific endpoint, graph, tool, or action. Create multiple agents with different `connector_config` values to call different workflows.
->
-> All `connector_config` fields can also be overridden per-call via `request.connector_config` at runtime.
-
-### Common connector_config fields (all frameworks)
-
-These fields are available on **every** connector type:
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `mode` | string | `"sync"` | Execution mode: `"sync"` (wait for HTTP response) or `"callback"` (fire request, wait for external system to POST back) |
-| `callback_timeout` | float | `120.0` | Seconds to wait for a callback response before timing out (only used when `mode: "callback"`) |
-
-#### Sync vs Callback Mode
-
-**Sync mode** (default): The connector POSTs to the external system and holds the HTTP connection open until the response arrives. This works when the external system returns the actual result in the same HTTP response.
-
-**Callback mode**: The connector POSTs to the external system with a `_leafmesh_callback_url` and `_leafmesh_session_id` injected into the payload. The connector then blocks internally until the external system POSTs the result back to `/callback/{agent_name}`. Use this when:
-- The external workflow takes longer than the HTTP timeout
-- The external system uses "fire and forget" (e.g., n8n's "Respond Immediately" mode)
-- You need the external system to process asynchronously and deliver results later
-
-**How external systems use callbacks:**
-
-The LeafMesh connector injects these fields into the outbound payload:
-- `_leafmesh_callback_url` — the URL to POST the result back to
-- `_leafmesh_session_id` — the session ID to include in the callback
-
-The external system should POST to `_leafmesh_callback_url` with a JSON body containing:
-```json
-{
-  "session_id": "<the _leafmesh_session_id value>",
-  "result": { ... }
-}
-```
-
-### connector_config fields per framework
-
-#### crewai
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `endpoint` | string | `""` | **yes** | `CREWAI_ENDPOINT` | HTTP endpoint for deployed CrewAI crew |
-| `api_key` | string | `""` | no | `CREWAI_API_KEY` | Bearer Token for authentication |
-| `user_api_key` | string | `""` | no | `CREWAI_USER_API_KEY` | User Bearer Token (preferred over `api_key` when both are set) |
-| `poll_interval` | float | `2.0` | no | — | Seconds between status polls |
-| `max_poll_seconds` | float | `300.0` | no | — | Max total polling time (seconds) |
-| `http_timeout` | float | `30.0` | no | — | HTTP request timeout (seconds) |
-
-#### langgraph
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `endpoint` | string | `""` | **yes** | `LANGGRAPH_ENDPOINT`, `LANGCHAIN_ENDPOINT` | LangGraph Platform deployment URL |
-| `api_key` | string | `""` | no | `LANGCHAIN_API_KEY`, `LANGGRAPH_API_KEY` | API key |
-| `graph_id` | string | `"agent"` | no | — | **Which graph to run** — this is the workflow selector |
-| `poll_interval` | float | `1.0` | no | — | Seconds between status polls |
-| `max_poll_seconds` | float | `300.0` | no | — | Max total polling time (seconds) |
-| `http_timeout` | float | `30.0` | no | — | HTTP request timeout (seconds) |
-
-#### autogen
-
-Connects to an external AutoGen Studio or custom AutoGen API service via HTTP.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `endpoint` | string | `""` | **yes** | `AUTOGEN_ENDPOINT` | AutoGen service base URL (e.g. `http://localhost:8081`) |
-| `api_key` | string | `""` | no | `AUTOGEN_API_KEY` | Bearer token for authentication |
-| `workflow_id` | string | `""` | no | — | Workflow/agent ID to execute on the AutoGen service |
-| `timeout` | float | `120.0` | no | — | HTTP request timeout (seconds) |
-| `poll_interval` | float | `2.0` | no | — | Seconds between status poll requests |
-| `max_poll_seconds` | float | `300.0` | no | — | Max total polling time (seconds) |
-
-#### a2a
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `url` | string | `""` | **yes** | `A2A_AGENT_URL` | A2A-compatible agent server base URL |
-| `auth_token` | string | `""` | no | `A2A_AUTH_TOKEN` | Bearer token for authentication |
-| `auth_scheme` | string | `"Bearer"` | no | — | Authorization header scheme |
-| `poll_interval` | float | `2.0` | no | — | Seconds between task status polls |
-| `max_poll_seconds` | float | `300.0` | no | — | Max total polling time (seconds) |
-| `http_timeout` | float | `30.0` | no | — | HTTP request timeout (seconds) |
-
-#### mcp
-
-MCP supports two transport modes. `tool_name` is always required.
-
-**Common fields (both transports):**
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `tool_name` | string | `""` | **yes** | — | **Which MCP tool to call** — the workflow selector |
-| `transport` | string | `"stdio"` | no | — | Transport mode: `"stdio"` or `"http"` |
-| `timeout` | float | `60.0` | no | — | Request timeout (seconds) |
-
-**stdio transport fields:**
-
-| Field | Type | Default | Required | Description |
-|-------|------|---------|----------|-------------|
-| `command` | string | `""` | **yes** (stdio) | Executable to launch (e.g. `"npx"`) |
-| `args` | list | `[]` | no | Command arguments (e.g. `["-y", "@mcp/server-npm"]`) |
-| `env` | dict | `null` | no | Environment variables for the subprocess |
-
-**http transport fields:**
-
-| Field | Type | Default | Required | Description |
-|-------|------|---------|----------|-------------|
-| `url` | string | `""` | **yes** (http) | MCP server HTTP/SSE endpoint |
-| `auth_token` | string | `""` | no | Bearer token |
-
-#### zapier
-
-Tool name is built as `{connection}_{action}` (e.g. `google_sheets_create_row`).
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `connection` | string | `""` | yes* | — | Zapier app name (e.g. `"google_sheets"`, `"slack"`, `"gmail"`) |
-| `action` | string | `""` | yes* | — | Action name (e.g. `"create_row"`, `"send_message"`) |
-| `mcp_key` | string | `""` | yes† | `ZAPIER_MCP_KEY` | Zapier MCP key — used first if `prefer_mcp=true` |
-| `api_key` | string | `""` | yes† | `ZAPIER_API_KEY` | Zapier REST API key — used as fallback |
-| `prefer_mcp` | bool | `true` | no | — | Try MCP path first; fall back to REST on failure |
-| `instructions` | string | `""` | no | — | Optional natural language instructions (REST path only) |
-| `timeout` | float | `60.0` | no | — | HTTP request timeout (seconds) |
-
-*At least one of `connection` or `action` required for the tool name. †At least one of `mcp_key` or `api_key` required.
-
-#### composio
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `action` | string | `""` | **yes** | — | **Composio action enum** (e.g. `"GITHUB_STAR_A_REPOSITORY"`) — the workflow selector |
-| `entity_id` | string | `"default"` | no | `COMPOSIO_ENTITY_ID` | User/entity context for managed auth |
-| `api_key` | string | `""` | no | `COMPOSIO_API_KEY` | Composio API key |
-| `timeout` | float | `60.0` | no | — | Execution timeout (seconds) |
-
-#### n8n
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `webhook_url` | string | `""` | **yes** | `N8N_WEBHOOK_URL` | Full webhook trigger URL — **one URL per n8n workflow** |
-| `auth_token` | string | `""` | no | `N8N_AUTH_TOKEN` | Bearer token |
-| `timeout` | float | `60.0` | no | — | HTTP request timeout (seconds, sync mode only) |
-
-**n8n webhook URL types:**
-- **Production:** `https://your-instance.app.n8n.cloud/webhook/<id>` — works when workflow is **activated** (toggle ON)
-- **Test:** `https://your-instance.app.n8n.cloud/webhook-test/<id>` — only works while n8n editor has "Listen for Test Event" active (one-shot, for development only)
-
-**n8n + callback mode:**
-
-When `mode: "callback"`, the n8n workflow should:
-1. Start with a Webhook trigger node (receives the payload including `_leafmesh_callback_url`)
-2. Configure the Webhook node to "Respond Immediately" (optional — sync mode works too)
-3. Process the workflow
-4. End with an HTTP Request node that POSTs back to `{{ $json._leafmesh_callback_url }}` with body:
-   ```json
-   { "session_id": "{{ $json._leafmesh_session_id }}", "result": { ... } }
-   ```
-
-#### hermes
-
-Calls a running Nous Research Hermes Agent API server (OpenAI-compatible); returns the agent's output inline.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `endpoint` | string | `"http://127.0.0.1:8642"` | no | `HERMES_ENDPOINT` | Hermes API server base URL |
-| `api_key` | string | `""` | no | `HERMES_API_SERVER_KEY`, `API_SERVER_KEY` | Bearer token (the host-side `API_SERVER_KEY`) |
-| `model` | string | `"hermes-agent"` | no | — | Model name sent in the request |
-| `api_mode` | string | `"chat"` | no | — | API surface: `"chat"` (`/v1/chat/completions`) or `"responses"` (`/v1/responses`, server-side multi-turn memory) |
-| `system_prompt` | string | `""` | no | — | Optional system message prepended to the call |
-| `http_timeout` | float | `300.0` | no | — | HTTP request timeout (seconds; also accepts `timeout`) |
-
-#### lyzr
-
-Calls a Lyzr Agent Studio hosted agent through its synchronous inference API; returns the reply inline.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `agent_id` | string | `""` | **yes** | `LYZR_AGENT_ID` | **Which Studio agent to invoke** — the workflow selector |
-| `api_key` | string | `""` | **yes** | `LYZR_API_KEY` | Header API key (`x-api-key`) from the agent's "Agent API" panel |
-| `endpoint` | string | `"https://agent-prod.studio.lyzr.ai"` | no | `LYZR_ENDPOINT` | Lyzr inference base URL |
-| `user_id` | string | `"leafmesh"` | no | `LYZR_USER_ID` | Who Lyzr attributes the run to |
-| `api_mode` | string | `"chat"` | no | — | API surface: `"chat"` or `"stream"` (streamed chunks assembled into one answer) |
-| `system_prompt_variables` | dict | `{}` | no | — | Lyzr system-prompt template variables |
-| `filter_variables` | dict | `{}` | no | — | Lyzr filter/routing variables |
-| `features` | list | `[]` | no | — | Lyzr feature toggles passed through to the agent |
-| `http_timeout` | float | `300.0` | no | — | HTTP request timeout (seconds; also accepts `timeout`) |
-
-#### writer
-
-Calls Writer's (Palmyra) OpenAI-compatible chat/agents API; returns the reply inline.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `api_key` | string | `""` | **yes** | `WRITER_API_KEY` | Bearer API key |
-| `endpoint` | string | `"https://api.writer.com"` | no | `WRITER_ENDPOINT` | Writer API base URL |
-| `model` | string | `"palmyra-x5"` | no | — | Writer model to call |
-| `system_prompt` | string | `""` | no | — | Optional system message prepended to the call |
-| `http_timeout` | float | `300.0` | no | — | HTTP request timeout (seconds; also accepts `timeout`) |
-
-#### dify
-
-Calls a Dify hosted chat/agent app through its blocking chat endpoint; returns the full reply inline.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `api_key` | string | `""` | **yes** | `DIFY_API_KEY` | Per-app API key (NOT the account key) |
-| `endpoint` | string | `"https://api.dify.ai/v1"` | no | `DIFY_ENDPOINT` | Dify API base URL |
-| `user_id` | string | `"leafmesh"` | no | `DIFY_USER_ID` | End-user identifier Dify attributes the run to |
-| `app_mode` | string | `"chat"` | no | — | **Which Dify app surface to call**: `"chat"` (chat-messages) or `"completion"` (completion-messages) |
-| `input_key` | string | `"query"` | no | — | For completion apps, the input variable name the message maps to |
-| `inputs` | dict | `{}` | no | — | Extra Dify app input variables |
-| `conversation_id` | string | `""` | no | — | Dify's own conversation id to continue a chat (NOT the mesh session_id) |
-| `http_timeout` | float | `300.0` | no | — | HTTP request timeout (seconds; also accepts `timeout`) |
-
-#### flowise
-
-Calls a Flowise chatflow/agentflow prediction endpoint; returns the reply inline.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `chatflow_id` | string | `""` | **yes** | `FLOWISE_CHATFLOW_ID` | **Which chatflow/agentflow to run** — the workflow selector |
-| `endpoint` | string | `"http://localhost:3000"` | no | `FLOWISE_ENDPOINT` | Flowise instance base URL |
-| `api_key` | string | `""` | no | `FLOWISE_API_KEY` | Optional bearer key (flows are public unless a key is assigned) |
-| `http_timeout` | float | `300.0` | no | — | HTTP request timeout (seconds; also accepts `timeout`) |
-
-#### voiceflow
-
-Calls a Voiceflow Dialog Manager agent (interact endpoint); returns the assistant trace text inline.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `api_key` | string | `""` | **yes** | `VOICEFLOW_API_KEY` | Dialog Manager API key (sent in `Authorization`, no Bearer prefix) |
-| `endpoint` | string | `"https://general-runtime.voiceflow.com"` | no | `VOICEFLOW_ENDPOINT` | Voiceflow runtime base URL |
-| `version_id` | string | `"production"` | no | `VOICEFLOW_VERSION_ID` | `versionID` header — which published version to run |
-| `http_timeout` | float | `120.0` | no | — | HTTP request timeout (seconds; also accepts `timeout`) |
-
-#### cognigy
-
-Calls a Cognigy.AI REST/Webhook Endpoint synchronously; returns the AI reply inline.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `endpoint` | string | `""` | **yes** | `COGNIGY_ENDPOINT` | **The per-bot REST/Webhook Endpoint URL** — the workflow selector (each bot is its own URL) |
-| `user_id` | string | `"leafmesh"` | no | `COGNIGY_USER_ID` | `userId` sent to Cognigy |
-| `basic_user` | string | `""` | no | `COGNIGY_BASIC_USER` | Optional HTTP Basic username configured on the Endpoint |
-| `basic_password` | string | `""` | no | `COGNIGY_BASIC_PASSWORD` | Optional HTTP Basic password configured on the Endpoint |
-| `http_timeout` | float | `120.0` | no | — | HTTP request timeout (seconds; also accepts `timeout`) |
-
-#### vellum
-
-Calls a Vellum workflow deployment through its synchronous execute endpoint; returns the selected output inline.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `api_key` | string | `""` | **yes** | `VELLUM_API_KEY` | API key (sent in `X-API-KEY`, NOT Bearer) |
-| `workflow_deployment_name` | string | `""` | yes* | `VELLUM_WORKFLOW_DEPLOYMENT_NAME` | **Which workflow deployment to run** — the workflow selector |
-| `workflow_deployment_id` | string | `""` | yes* | — | Alternative to `workflow_deployment_name` |
-| `endpoint` | string | `"https://predict.vellum.ai"` | no | `VELLUM_ENDPOINT` | Vellum API base URL |
-| `release_tag` | string | `""` | no | — | Optional release tag to pin the deployment version |
-| `input_name` | string | `"message"` | no | — | Which workflow input the mesh message maps to |
-| `output_name` | string | `""` | no | — | Which named output becomes the reply (defaults to the first output) |
-| `http_timeout` | float | `300.0` | no | — | HTTP request timeout (seconds; also accepts `timeout`) |
-
-*Either `workflow_deployment_name` or `workflow_deployment_id` is required.
-
-#### stackai
-
-Calls a Stack AI exported flow through its synchronous run endpoint; returns the selected output inline.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `api_key` | string | `""` | **yes** | `STACKAI_API_KEY` | Bearer API key |
-| `org_id` | string | `""` | **yes** | `STACKAI_ORG_ID` | Stack AI organization id (in the run URL) |
-| `flow_id` | string | `""` | **yes** | `STACKAI_FLOW_ID` | **Which flow to run** — the workflow selector (in the run URL) |
-| `endpoint` | string | `"https://stack-inference.com"` | no | `STACKAI_ENDPOINT` | Stack AI inference base URL |
-| `input_key` | string | `"in-0"` | no | — | Which flow input key the mesh message maps to |
-| `output_key` | string | `""` | no | — | Which output field becomes the reply (defaults to surfacing the whole outputs object) |
-| `http_timeout` | float | `300.0` | no | — | HTTP request timeout (seconds; also accepts `timeout`) |
-
-#### agentforce
-
-Calls a Salesforce Agentforce agent via the Agent API (OAuth token → open session → send message); returns the reply inline.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `agent_id` | string | `""` | **yes** | `AGENTFORCE_AGENT_ID` | **Which Agentforce agent to invoke** — the workflow selector |
-| `domain_url` | string | `""` | **yes** | `AGENTFORCE_DOMAIN_URL` | Org My Domain URL (e.g. `https://mycompany.my.salesforce.com`) — used for OAuth |
-| `client_id` | string | `""` | **yes** | `AGENTFORCE_CLIENT_ID` | Connected/External Client App client id (client-credentials flow) |
-| `client_secret` | string | `""` | **yes** | `AGENTFORCE_CLIENT_SECRET` | Connected/External Client App client secret |
-| `api_base` | string | `"https://api.salesforce.com"` | no | `AGENTFORCE_API_BASE` | Agent API base URL |
-| `http_timeout` | float | `300.0` | no | — | HTTP request timeout (seconds; also accepts `timeout`) |
-
-#### watsonx
-
-Calls an IBM watsonx Orchestrate agent through its OpenAI-compatible chat endpoint (IBM Cloud key → IAM bearer token, or a ready bearer); returns the reply inline.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `service_url` | string | `""` | **yes** | `WATSONX_SERVICE_URL` | Orchestrate service instance URL (per-tenant) |
-| `api_key` | string | `""` | yes* | `WATSONX_API_KEY` | IBM Cloud API key (exchanged for an IAM bearer token) |
-| `bearer_token` | string | `""` | yes* | `WATSONX_BEARER_TOKEN` | A ready IAM bearer token (skips the key exchange) |
-| `agent_id` | string | `""` | yes† | `WATSONX_AGENT_ID` | **Which Orchestrate agent to invoke** — the workflow selector (goes in the request path) |
-| `iam_url` | string | `"https://iam.cloud.ibm.com/identity/token"` | no | — | IBM IAM token endpoint |
-| `chat_path` | string | `""` | no | — | Full override of the path after `service_url` (built from `agent_id` when unset) |
-| `model` | string | `""` | no | — | Optional model name sent in the payload |
-| `system_prompt` | string | `""` | no | — | Optional system message prepended to the call |
-| `http_timeout` | float | `300.0` | no | — | HTTP request timeout (seconds; also accepts `timeout`) |
-
-*One of `api_key` or `bearer_token` is required. †`agent_id` is required unless an explicit `chat_path` is given.
-
-#### relevance
-
-Calls a Relevance AI agent via its async trigger + poll API; returns the agent's answer once the run completes.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `project_id` | string | `""` | **yes** | `RELEVANCE_PROJECT_ID` | Relevance project id (half of the `{project_id}:{api_key}` auth token) |
-| `api_key` | string | `""` | **yes** | `RELEVANCE_API_KEY` | Relevance API key |
-| `agent_id` | string | `""` | **yes** | `RELEVANCE_AGENT_ID` | **Which agent to trigger** — the workflow selector |
-| `region` | string | `""` | no | `RELEVANCE_REGION` | Region used to build the base URL (`https://api-{region}.stack.tryrelevance.com`) |
-| `base_url` | string | `""` | no | `RELEVANCE_BASE_URL` | Explicit base URL (overrides `region`) |
-| `poll_interval` | float | `3.0` | no | — | Seconds between async polls |
-| `max_poll_seconds` | float | `120.0` | no | — | Max total polling time (seconds) |
-| `http_timeout` | float | `60.0` | no | — | HTTP request timeout (seconds; also accepts `timeout`) |
-
-#### wordware
-
-Calls a Wordware released app (NDJSON streaming run); the connector assembles the streamed output into one final answer.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `api_key` | string | `""` | **yes** | `WORDWARE_API_KEY` | Bearer API key |
-| `app_id` | string | `""` | **yes** | `WORDWARE_APP_ID` | **Which released app to run** — the workflow selector |
-| `endpoint` | string | `"https://app.wordware.ai"` | no | `WORDWARE_ENDPOINT` | Wordware API base URL |
-| `version` | string | `"^1.0"` | no | — | App version constraint sent with the run |
-| `input_key` | string | `"message"` | no | — | Which app input the mesh message maps to |
-| `inputs` | dict | `{}` | no | — | Extra app input variables |
-| `http_timeout` | float | `300.0` | no | — | HTTP request timeout (seconds; also accepts `timeout`) |
-
-> **In-process agent SDKs (frameworks, not HTTP services).** The two connectors below run an agent SDK locally inside the LeafMesh process — there is no hosted endpoint to POST to. (Raw Claude/OpenAI model calls live in the LLM provider layer, not here.)
-
-#### claude_agent
-
-Runs an agent built on the Claude Agent SDK (`claude-agent-sdk`) in-process via `query()`; returns the final result. Requires `pip install claude-agent-sdk` and the Claude Code CLI on the host.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `api_key` | string | `""` | no | `ANTHROPIC_API_KEY` | Anthropic API key (passed to the SDK subprocess via options.env) |
-| `model` | string | `""` | no | — | Model the agent runs on (SDK default when empty) |
-| `system_prompt` | string | `""` | no | — | System prompt for the agent |
-| `max_turns` | int | `null` | no | — | Max agent turns (SDK default when unset) |
-| `allowed_tools` | list | `null` | no | — | Tools the agent is allowed to use |
-| `permission_mode` | string | `""` | no | — | SDK permission mode for tool use |
-| `cwd` | string | `""` | no | — | Working directory for the agent run |
-| `timeout` | float | `600.0` | no | — | Max run time (seconds; also accepts `http_timeout`) |
-
-#### openai_agents
-
-Runs an agent built on the OpenAI Agents SDK (`openai-agents`) in-process via `Runner.run()`; returns `final_output`. Requires `pip install openai-agents`.
-
-| Field | Type | Default | Required | Env Fallback | Description |
-|-------|------|---------|----------|-------------|-------------|
-| `api_key` | string | `""` | no | `OPENAI_API_KEY` | OpenAI API key (per-run model provider; falls back to env when empty) |
-| `name` | string | `"LeafMesh Agent"` | no | — | Agent name |
-| `instructions` | string | `""` | no | — | Agent instructions (the system prompt) |
-| `model` | string | `""` | no | — | Model the agent runs on (SDK default when empty) |
-| `max_turns` | int | `null` | no | — | Max agent turns (SDK default when unset) |
-| `timeout` | float | `600.0` | no | — | Max run time (seconds; also accepts `http_timeout`) |
-
----
-
-## Programmatic Agent Fields (`agent_type: "programmatic"`)
-
-These fields are used when `agent_type` is `"programmatic"`.
-
-| Field | Type | Default | Accepted Values | Description |
-|-------|------|---------|-----------------|-------------|
-| `integration` | string | `null` | `zapier`, `composio`, `n8n`, `mcp` | Integration connector (optional) |
-| `connector_config` | dict | `{}` | integration-specific key-values | Same fields as the matching external framework connector — see tables above |
-
-**Validation rule:** `integration` is only valid when `agent_type` is `"programmatic"`.
-
-When `integration` is set, `connector_config` is passed as `**kwargs` to the connector's `__init__`. Use the same fields as the matching framework in the tables above (zapier → zapier fields, mcp → mcp fields, etc.).
-
-The common fields (`mode`, `callback_timeout`) are also available here — programmatic agents with connectors support the same sync/callback modes as external agents.
-
----
-
-## WebhookConfig
-
-Used inside `webhook_config` for human agents.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `outbound_url` | string | `null` | URL to POST responses to external system |
-| `outbound_headers` | dict | `{}` | Headers for outbound webhook (key-value string pairs) |
-| `outbound_timeout` | int | `30` | Timeout for outbound calls (seconds) |
-| `inbound_endpoint` | string | `null` | Endpoint path for inbound responses (e.g. `"/webhook/human_contact"`). If not set, derived from entry points. |
-| `inbound_auth_token` | string | `null` | Auth token for validating inbound requests |
-| `response_mapping` | dict | `{}` | Field mapping for webhook response transformation |
-| `max_retries` | int | `3` | Max retry attempts for failed outbound webhooks |
-| `retry_delay` | int | `5` | Delay between retries (seconds) |
-
----
-
-## ChannelConfig
-
-Used inside `channels` dict for human agents. Keys are provider names.
-
-### Supported Provider Keys
-
-| Key | Provider |
-|-----|----------|
-| `slack` | Slack Bot API |
-| `telegram` | Telegram Bot API |
-| `discord` | Discord Bot API |
-| `whatsapp` | WhatsApp Business API (Meta Cloud API) |
-| `teams` | Microsoft Teams Bot Framework |
-| `email` | SMTP outbound + IMAP inbound (BRD-020, v2.3.x). Optional provider-API mode for Mailgun / SendGrid / Postmark. Talon reply-stripping built in. Threading via `Message-ID` / `In-Reply-To` / `References` headers. See per-provider semantics below. |
-
-### Fields Per Channel
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token` | string | `null` | Bot/API token for the provider (see per-provider notes below) |
-| `signing_secret` | string | `null` | Request verification secret (see per-provider notes below) |
-| `listen_channels` | list | `[]` | Channel/chat IDs to accept inbound messages from (empty = all) |
-| `post_channel` | string | `null` | Default channel/chat ID for outbound messages (see per-provider notes below) |
-| `verify_token` | string | `null` | Webhook verification token — **WhatsApp only** (`hub.verify_token`) |
-
-**Note:** `ChannelConfig` allows extra fields (`extra="allow"`) for any provider-specific config.
-
-### Per-Provider Field Semantics
-
-| Provider | `bot_token` | `signing_secret` | `post_channel` | `verify_token` |
-|----------|------------|------------------|----------------|----------------|
-| `slack` | Bot OAuth token (`xoxb-…`) | Slack signing secret (HMAC-SHA256) | Channel ID (e.g. `C123456`) | — |
-| `telegram` | Bot token from @BotFather | Secret token set when registering webhook | Chat ID | — |
-| `discord` | Bot token (without `Bot ` prefix) | App public key (Ed25519 — requires `pynacl`) | Channel ID | — |
-| `whatsapp` | Meta Graph API access token | Meta app secret (HMAC-SHA256) | Phone number ID | `hub.verify_token` for webhook registration |
-| `teams` | Bot Framework App ID | Bot Framework App password | Conversation ID | — |
-| `email` | — (uses `smtp_*` / `imap_*` fields, not `bot_token`) | — (use `dkim_private_key` for outbound DKIM) | `from_address` is the canonical outbound sender | — |
-
-### Email-channel-specific fields (v2.3.x — BRD-020)
-
-| Field | Type | Purpose |
-|---|---|---|
-| `smtp_host` / `smtp_port` / `smtp_user` / `smtp_password` | str / int / str / str | Outbound SMTP transport. Use `aiosmtplib` (non-blocking) |
-| `from_address` | str | Canonical outbound sender (e.g. `support@example.com`) |
-| `dkim_private_key` | str | Optional — DKIM signing for outbound mail |
-| `imap_host` / `imap_port` / `imap_user` / `imap_password` | str / int / str / str | Inbound IMAP. Polled (IMAP isn't push) |
-| `imap_folder` | str | Inbox folder to watch (default `INBOX`) |
-| `provider` | str | Optional — `mailgun` / `sendgrid` / `postmark` to use provider API instead of raw SMTP |
-| `provider_api_key` | str | API key for the chosen provider |
-
-### Inbound Route Registered Per Provider
-
-| Provider | Route |
-|----------|-------|
-| `slack` | `POST /channels/slack/{agent_name}/events` |
-| `telegram` | `POST /channels/telegram/{agent_name}/webhook` |
-| `discord` | `POST /channels/discord/{agent_name}/interactions` |
-| `whatsapp` | `GET /channels/whatsapp/{agent_name}/webhook` (verification) + `POST` (messages) |
-| `teams` | `POST /channels/teams/{agent_name}/messages` |
-| `email` | No HTTP route — inbound is polled via IMAP; outbound bounce/complaint webhooks may be configured separately at the provider |
-
-### Example
-
-```yaml
-channels:
-  slack:
-    bot_token: "${SLACK_BOT_TOKEN:}"
-    signing_secret: "${SLACK_SIGNING_SECRET:}"
-    listen_channels: ["C123456", "C789012"]
-    post_channel: "C123456"
-    operators:                                    # v2.2.44+ per-operator routing
-      alice: "U0ALICE"                            # Slack user ID (DM)
-      bob:   "U0BOB"
-
-  telegram:
-    bot_token: "${TELEGRAM_BOT_TOKEN:}"
-    signing_secret: "${TELEGRAM_SECRET_TOKEN:}"   # optional
-    listen_channels: []                            # empty = all chats
-    post_channel: ""
-    operators:
-      alice: "12345678"                           # Telegram chat_id
-
-  discord:
-    bot_token: "${DISCORD_BOT_TOKEN:}"
-    signing_secret: "${DISCORD_PUBLIC_KEY:}"       # Ed25519 public key
-    listen_channels: ["987654321098765432"]
-    post_channel: "987654321098765432"
-
-  whatsapp:
-    bot_token: "${WHATSAPP_ACCESS_TOKEN:}"
-    signing_secret: "${META_APP_SECRET:}"
-    post_channel: "${WHATSAPP_PHONE_NUMBER_ID:}"   # phone number ID, not a phone number
-    verify_token: "my_verify_token"                # set same value in Meta dashboard
-    operators:
-      alice: "+14155551234"                       # WhatsApp phone number
-
-  teams:
-    bot_token: "${TEAMS_APP_ID:}"
-    signing_secret: "${TEAMS_APP_PASSWORD:}"
-    post_channel: ""                               # set at runtime from inbound activity
-```
-
-### Dynamic Per-Call Routing (v2.2.44+)
-
-`operator_ids` is the logical roster ("alice, bob"). Each channel's `operators:` map resolves those logical ids to channel-specific recipient ids. Pre-compose then steers per call by setting `_target_operator` in `input_data`:
-
-```python
-from leafmesh import pre_compose
-
-@pre_compose(input_data=lambda data, ctx: {
-    **data,
-    "_target_operator": _todays_oncall(),    # "alice" Mon, "bob" Tue, ...
-})
-async def escalation_agent(input_data, context):
-    return {"alert": input_data["incident"]}
-```
-
-With Slack + WhatsApp configured, the same `_target_operator: "alice"` dispatches to alice's Slack DM AND alice's WhatsApp number in parallel — each channel pulls from its own `operators:` map. Fail-soft: if alice has no entry under `whatsapp.operators`, WhatsApp falls back to `post_channel`.
-
-Other pre-compose routing keys (escape hatches for dynamic recipients):
-
-| Key | Effect |
-|---|---|
-| `_target_channel_id` | Raw recipient id — bypasses operator lookup, useful when the id comes from a Zapier / DB lookup |
-| `_target_channel_provider` | Pins outbound to one provider when several configured (`"slack"`) |
-| `_target_webhook_url` | Raw URL override for the webhook fallback path |
-
----
-
-## Event Listeners — BRD-021 (Kafka / SQS / MQTT / Redis Streams / IMAP)
-
-Fire agents automatically when an **external event** arrives — no `mesh_call` needed. Two-part config: declare broker connections at the top level, then bind agents to topics/queues via per-agent `listen_events:`.
-
-### Install only what you need
-
-```bash
-pip install leafmesh[kafka]       # aiokafka
-pip install leafmesh[sqs]         # aioboto3
-pip install leafmesh[mqtt]        # asyncio-mqtt (listener lands in a follow-up)
-pip install leafmesh[imap]        # aioimaplib (listener lands in a follow-up)
-pip install leafmesh[listeners]   # all four bundled
-# Redis Streams uses the core `redis` dep — no extra needed
-```
-
-### Part 1 — top-level `brokers:` block (connection definitions)
-
-```yaml
-brokers:
-  orders_kafka:                              # arbitrary connection name
-    type: kafka
-    bootstrap_servers: ["kafka-1:9092", "kafka-2:9092"]
-    security_protocol: SASL_SSL              # PLAINTEXT | SSL | SASL_PLAINTEXT | SASL_SSL
-    sasl_mechanism: SCRAM-SHA-512            # PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512 | GSSAPI
-    sasl_username: leafmesh
-    sasl_password: ${KAFKA_PASSWORD}
-    # ssl_cafile / ssl_certfile / ssl_keyfile for mTLS
-
-  support_queue:
-    type: sqs
-    region: us-east-1
-    # aws_access_key_id / aws_secret_access_key — only when running outside AWS;
-    # otherwise the IAM role chain is used.
-    # endpoint_url: http://localhost:4566    # LocalStack / VPC endpoints
-
-  iot_feed:
-    type: mqtt
-    host: broker.example.com
-    port: 8883
-    use_tls: true
-    username: leafmesh
-    password: ${MQTT_PASSWORD}
-    client_id: "leafmesh-iot"                # random if unset
-    keepalive_s: 60
-
-  upstream_events:
-    type: redis_streams
-    url: redis://events.example.com:6379     # distinct from SDK's primary Redis
-    db: 0
-
-  ticket_inbox:
-    type: imap
-    host: imap.example.com
-    port: 993
-    username: support@example.com
-    password: ${IMAP_PASSWORD}
-    use_tls: true
-```
-
-### Part 2 — bind agents via `listen_events:` (per agent)
-
-```yaml
-agents:
-  order_processor:
-    agent_type: programmatic
-    listen_events:
-      - broker: orders_kafka                 # references brokers.orders_kafka above
-        topic: orders.created                # Kafka topic
-        group_id: leafmesh-order-processor   # consumer group; defaults to <sdk-name>-<agent-name>
-        batch_size: 10
-        filter:                              # CloudEvents-style AND-equality filter
-          type: "com.example.order.created"
-          source: "/region/us-east-1"
-        deserialize: "my_app.schemas:OrderEvent"   # Pydantic class — ValidationError → DLQ
-        delivery:
-          max_retries: 3
-          backoff: exponential                # linear | exponential
-          backoff_initial_s: 1.0
-          backoff_max_s: 60.0
-          dead_letter:
-            broker: orders_kafka
-            topic: orders.dlq
-
-      - broker: support_queue                # SQS queue (parallel binding on same agent)
-        queue: support-tickets
-        visibility_heartbeat: true           # auto-extend SQS visibility while handler runs
-        batch_size: 5
-
-  iot_telemetry:
-    agent_type: programmatic
-    listen_events:
-      - broker: iot_feed
-        mqtt_topic: "sensors/+/temperature"  # wildcards: + (single) and # (multi)
-        qos: 1                               # 0 = at-most-once, 1 = at-least-once, 2 = exactly-once
-
-  email_triage:
-    agent_type: llm
-    listen_events:
-      - broker: ticket_inbox
-        folder: INBOX
-        unseen_only: true
-        poll_interval_s: 30                  # IMAP is not push, polled
-```
-
-### Source-field cheat sheet (only one set per listener)
-
-| Broker `type` | Destination fields | Notes |
-|---|---|---|
-| `kafka` | `topic`, `group_id` | `group_id` defaults to `<sdk-name>-<agent-name>` |
-| `sqs` | `queue` | Use queue name or full URL. `visibility_heartbeat: true` for long handlers |
-| `redis_streams` | `stream`, `consumer_group` | At-least-once via consumer groups + XACK |
-| `mqtt` | `mqtt_topic`, `qos` | Wildcards: `+` single-level, `#` multi-level |
-| `imap` | `folder`, `poll_interval_s`, `unseen_only` | Polling (IMAP doesn't push) |
-
-### Universal listener fields
-
-| Field | Default | Purpose |
-|---|---|---|
-| `broker` | (required) | Name of a broker in the top-level `brokers:` block |
-| `filter` | `null` | CloudEvents attribute filter — message must match ALL `(key, value)` pairs |
-| `deserialize` | `null` | `"module.path:ClassName"` Pydantic class — `ValidationError` routes to DLQ |
-| `delivery.max_retries` | `3` | Retry attempts before DLQ |
-| `delivery.backoff` | `"exponential"` | `linear` or `exponential` |
-| `delivery.backoff_initial_s` | `1.0` | Initial backoff seconds |
-| `delivery.backoff_max_s` | `60.0` | Backoff cap |
-| `delivery.dead_letter` | `null` | DLQ destination (`{broker, topic/queue/stream}`) |
-| `batch_size` | `1` | Messages fetched per poll cycle (1–1000) |
-
-### Delivery semantics
-
-- **At-least-once** across all sources. Idempotency keying is `(listener_name, message_id)` — your agent handler should be safe to re-execute on retry.
-- After `delivery.max_retries`, the message is moved to `delivery.dead_letter` if configured, otherwise logged and dropped.
-- Listener tasks live for the SDK process lifetime — graceful shutdown via `sdk.stop()`.
-- Each listener is **parallel** with mesh_call entry points and `wake_up` cron — they're independent trigger surfaces on the same agent.
-
-### When to use what
-
-| Use case | Broker |
-|---|---|
-| Microservice event bus, high throughput | `kafka` |
-| AWS-native job queue with retries | `sqs` |
-| IoT telemetry / pub-sub | `mqtt` |
-| Same-stack event stream (no new infra) | `redis_streams` |
-| Email-to-agent ingestion | `imap` |
-
----
-
-## Memory Config
-
-Field: `memory` — accepts `bool` or `dict`.
-
-### Simple Mode
-
-```yaml
-memory: false   # Disabled (default)
-memory: true    # Enabled with defaults
-```
-
-### Advanced Mode (Dict)
-
-| Field | Type | Default | Accepted Values | Description |
-|-------|------|---------|-----------------|-------------|
-| `strategy` | string | `"recency"` | `recency`, `relevance`, `hybrid` | Memory retrieval strategy |
-| `limit` | int | `10` | 1 – 100 | Max feed posts per invocation |
-| `cross_session` | bool | `false` | `true`, `false` | Persist memory across sessions |
-| `cross_session_limit` | int | `50` | 1 – 500 | Max cross-session posts to retain |
-| `relevance_weight` | float | `0.6` | 0.0 – 1.0 | Weight for relevance scoring |
-| `recency_weight` | float | `0.4` | 0.0 – 1.0 | Weight for recency scoring |
-| `decay_hours` | int | `24` | 1 – unlimited | Hours before entries decay |
-
-### Example
-
-```yaml
-memory:
-  strategy: "hybrid"
-  limit: 10
-  cross_session: true
-  cross_session_limit: 50
-  relevance_weight: 0.6
-  recency_weight: 0.4
-  decay_hours: 24
-```
-
----
-
-## EscalationConfig
-
-Used inside `manager.escalation`.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `targets` | list of [EscalationTarget](#escalationtarget) | `[]` | Escalation targets — all fire in parallel |
-| `auto_escalate` | dict | see below | Auto-escalation rules |
-
-### `auto_escalate` Fields
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `max_retries` | int | `3` | Max retry attempts before escalating |
-| `max_errors_per_session` | int | `5` | Error count threshold per session |
-| `timeout_threshold` | int | `2` | Consecutive timeouts before escalating |
-
----
-
-## EscalationTarget
-
-Each target in the `escalation.targets` list.
-
-| Field | Type | Default | Accepted Values | Applies To |
-|-------|------|---------|-----------------|------------|
-| `type` | string | **required** | `human_agent`, `webhook`, `channel` | all |
-| `agent` | string | `null` | agent name | `human_agent` |
-| `entry_point` | string | `null` | entry point name | `human_agent` |
-| `url` | string | `null` | URL | `webhook` |
-| `method` | string | `"POST"` | `POST`, `PUT`, `PATCH` | `webhook` |
-| `headers` | dict | `{}` | key-value string pairs | `webhook` |
-| `payload_template` | dict | `null` | JSON with `{{var}}` placeholders | `webhook` |
-| `provider` | string | `null` | `slack`, `telegram`, `discord`, `whatsapp`, `teams` | `channel` |
-| `channel_id` | string | `null` | channel ID | `channel` |
-| `message_template` | string | `null` | text with `{{var}}` placeholders | `channel` |
-
-### Example
-
-```yaml
-escalation:
-  targets:
-    - type: "human_agent"
-      agent: "customer_support_team"
-
-    - type: "webhook"
-      url: "https://incident.example.com/api/escalate"
-      method: "POST"
-      headers:
-        Authorization: "Bearer ${ESCALATION_TOKEN:}"
-      payload_template:
-        incident_id: "{{session_id}}"
-        severity: "{{severity_level}}"
-        message: "{{error_message}}"
-
-    - type: "channel"
-      provider: "slack"
-      channel_id: "#critical-incidents"
-      message_template: "Escalation: {{message}} (session: {{session_id}})"
-
-  auto_escalate:
-    max_retries: 3
-    max_errors_per_session: 5
-    timeout_threshold: 2
-```
-
----
-
-## Top-Level Config (LeafMeshConfig)
-
-| Field | Type | Default | Accepted Values | Description |
-|-------|------|---------|-----------------|-------------|
-| `name` | string | `"default_mesh"` | any string | Mesh name |
-| `version` | string | `"1.0.0"` | any string | Configuration version |
-| `architecture` | string | `"managed_mesh"` | `managed_mesh` | Architecture type (only one supported) |
-| `debug` | bool | `false` | `true`, `false` | Enable debug mode |
-| `log_level` | string | `"INFO"` | `DEBUG`, `INFO`, `WARNING`, `ERROR` | Logging level |
-| `environment` | string | `"development"` | `development`, `production` | Environment |
-| `redis` | object | see [RedisConfig](#redisconfig) | — | Redis connection |
-| `manager` | object | see [ManagerConfig](#managerconfig) | — | Manager coordination + analysis |
-| `mesh` | object | see [MeshConfig](#meshconfig--cloud-providers) | — | Mesh network + cloud providers |
-| `agents` | dict | `{}` | agent name → AgentConfig | Agent configurations |
-| `entry_points` | list | `[{"name": "default_entry", "target": "summarizer", "condition": "always"}]` | see [Entry Points](#entry-points) | Named portals into mesh |
-| `data_structures` | dict | `{}` | name → DataStructure | Custom data type definitions |
-| `auto_discover` | dict | `null` | `{"directory": "path", "pattern": "*.py", "recursive": true}` | Auto-discover agent files |
-| `evolution` | object | see [EvolutionConfig](#evolutionconfig) | — | Evolutionary optimization |
-| `brokers` | dict | `{}` | name → KafkaBrokerConfig \| SQSBrokerConfig \| MQTTBrokerConfig \| RedisStreamsBrokerConfig \| IMAPBrokerConfig | External broker connection definitions for [Event Listeners — BRD-021](#event-listeners--brd-021-kafka--sqs--mqtt--redis-streams--imap). Referenced by name from each agent's `listen_events:` block |
-
-**Note:** `LeafMeshConfig` has `extra="forbid"` — unknown top-level keys will raise a validation error.
-
----
-
-## ManagerConfig
-
-| Field | Type | Default | Accepted Values | Description |
-|-------|------|---------|-----------------|-------------|
-| `enabled` | bool | `true` | `true`, `false` | Enable manager + summarizer |
-| `model` | string | `"gpt-4o-mini"` | same as [Model List](#model-list) | LLM model for Summarizer analysis |
-| `domain` | string | `"generic"` | `generic`, `ecommerce`, `data_analysis` | Summarizer domain specialization |
-| `prompt` | string | `null` | any string (multiline supported) | **Evaluation criteria** — tell the Manager what success looks like, what to escalate on, and what patterns to watch. Injected into every Summarizer analysis call as an `EVALUATION CRITERIA` section, alongside the domain prompt. |
-| `can_intervene` | bool | `true` | `true`, `false` | Allow manager interventions (false = read-only) |
-| `coordination_rules` | dict | `{}` | arbitrary key-values | User-defined business rules |
-| `chain_completion_timeout` | float | `60.0` | seconds | Wait time before checking chain completeness |
-| `health_check_interval` | int | `60` | seconds | Seconds between health checks |
-| `agent_timeout_threshold` | int | `180` | seconds | Seconds before agent is timed out |
-| `escalation` | object | `null` | see [EscalationConfig](#escalationconfig) | Escalation targets and rules |
-| `routing` | dict | see below | — | Manager routing configuration |
-
-### `manager.prompt` — Evaluation Criteria
-
-Gives the Manager direct context about your mesh's specific purpose, success criteria, and escalation triggers. The Summarizer reads this on every agent turn alongside its domain template.
-
-```yaml
-manager:
-  model: "gpt-4o-mini"
-  domain: "generic"
-  prompt: |
-    This mesh handles customer support tickets.
-    A successful flow means:
-      - greeter identifies the issue category correctly
-      - processor routes to the right specialist agent
-      - the customer receives a clear resolution within 5 minutes
-
-    Escalate if:
-      - the same issue loops more than twice
-      - sentiment is negative AND no resolution has been proposed
-      - the human agent times out without responding
-
-    Watch for:
-      - advisor_agent confidence scores below 0.6
-      - processor_agent routing to fallback more than 50% of the time
-```
-
-### `routing` Fields
-
-| Field | Type | Default | Accepted Values | Description |
-|-------|------|---------|-----------------|-------------|
-| `mode` | string | `"static"` | `static`, `learning` | Routing mode (static=YAML only, learning=adaptive) |
-| `memory_size` | int | `100` | 1 – 1000 | Max routing decisions to remember |
-| `confidence_threshold` | float | `0.7` | 0.0 – 1.0 | Min confidence to accept learned route |
-| `fallback` | string | `"all"` | `all` | Fallback when confidence too low |
-| `decay_days` | int | `30` | 1 – 365 | Days before old routing memory decays |
-
-### `human_input_rules` (Defaults)
-
-| Field | Type | Default |
-|-------|------|---------|
-| `max_concurrent_requests` | int | `3` |
-| `max_agent_requests` | int | `5` |
-| `enable_request_queuing` | bool | `true` |
-
-### `timeout_rules` (Defaults)
-
-| Field | Type | Default |
-|-------|------|---------|
-| `max_timeouts_before_escalation` | int | `2` |
-| `timeout_escalation_enabled` | bool | `true` |
-| `escalation_notify_managers` | bool | `true` |
-
-### `workflow_pause_rules` (Defaults)
-
-| Field | Type | Default |
-|-------|------|---------|
-| `max_pause_duration_minutes` | int | `30` |
-| `max_concurrent_paused_workflows` | int | `2` |
-| `pause_monitoring_enabled` | bool | `true` |
-
-### `human_response_rules` (Defaults)
-
-| Scenario | `requires_manager_review` | `auto_escalate` |
-|----------|--------------------------|-----------------|
-| `approval` | `false` | `false` |
-| `escalation` | `true` | `true` |
-| `timeout` | `true` | `false` |
-
----
-
-## MeshConfig & Cloud Providers
-
-### MeshConfig
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `call_timeout` | int | `30` | Call timeout in seconds |
-| `max_chain_events` | int | `50` | Hard cap on chain events per session before the cycle breaker stops the chain (session `status: stopped` + `ChainCapExceeded`). Raise for legitimately deep flows (research / batch fan-out) — see [Rule 3](#rule-3--bound-every-retry-back-edge) |
-| `bedrock` | object | `null` | AWS Bedrock config |
-| `vertex` | object | `null` | Google Vertex AI config |
-| `foundry` | object | `null` | Microsoft Foundry/Azure AI config |
-| `local` | object | `null` | Local model server config (vLLM, SGLang, Ollama, etc.) |
-
-### BedrockConfig (AWS)
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `region` | string | `"us-east-1"` | AWS region |
-| `profile` | string | `null` | AWS profile from `~/.aws/credentials` |
-| `endpoint_url` | string | `null` | Custom Bedrock endpoint URL |
-
-Auth: `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` env vars, IAM role, or `~/.aws/credentials`
-
-### VertexConfig (Google Cloud)
-
-| Field | Type | Default | Required | Description |
-|-------|------|---------|----------|-------------|
-| `project` | string | — | **yes** | GCP project ID |
-| `location` | string | `"us-central1"` | no | GCP region |
-
-Auth: `GOOGLE_APPLICATION_CREDENTIALS` env var or `gcloud auth`
-
-### FoundryConfig (Azure)
-
-| Field | Type | Default | Required | Description |
-|-------|------|---------|----------|-------------|
-| `endpoint` | string | — | **yes** | Foundry endpoint URL (e.g. `https://<resource>.openai.azure.com`) |
-| `api_version` | string | `null` | no | Azure API version (e.g. `2024-10-21`). Omit for v1 endpoint. |
-
-Auth: `AZURE_FOUNDRY_API_KEY` or `AZURE_FOUNDRY_TOKEN` env vars
-
-### LocalModelConfig
-
-| Field | Type | Default | Required | Description |
-|-------|------|---------|----------|-------------|
-| `endpoint` | string | `"http://localhost:11434/api/generate"` | no | Model server URL |
-| `server_type` | string | `null` (auto-detect) | no | Server type: `openai`, `ollama`, `textgen`, `huggingface` |
-| `timeout` | float | `120.0` | no | Request timeout in seconds |
-| `headers` | dict | `{}` | no | Custom HTTP headers (e.g. for auth) |
-
-Env fallbacks: `LOCAL_MODEL_ENDPOINT`, `LOCAL_MODEL_SERVER_TYPE`, `LOCAL_MODEL_TIMEOUT`
-
-**Supported servers and their `endpoint` + `server_type`:**
-
-| Server | `server_type` | Example `endpoint` |
-|--------|--------------|-------------------|
-| vLLM | `openai` | `http://localhost:8000/v1/chat/completions` |
-| SGLang | `openai` | `http://localhost:30000/v1/chat/completions` |
-| llama.cpp server | `openai` | `http://localhost:8080/v1/chat/completions` |
-| LM Studio | `openai` | `http://localhost:1234/v1/chat/completions` |
-| LocalAI | `openai` | `http://localhost:8080/v1/chat/completions` |
-| TGI (--api openai) | `openai` | `http://localhost:8080/v1/chat/completions` |
-| TensorRT-LLM | `openai` | `http://localhost:8000/v1/chat/completions` |
-| Triton + vLLM | `openai` | `http://localhost:8000/v1/chat/completions` |
-| Ollama | `ollama` | `http://localhost:11434/api/generate` |
-| Text Gen Web UI | `textgen` | `http://localhost:5000/api/v1/generate` |
-| HF Inference | `huggingface` | `https://api-inference.huggingface.co/models/...` |
-
-> **Tip:** Most production servers (vLLM, SGLang, TGI, llama.cpp) expose OpenAI-compatible endpoints. Use `server_type: openai` for all of them. If `server_type` is omitted, it's auto-detected from the URL.
-
-```yaml
-mesh:
-  local:
-    endpoint: http://localhost:8000/v1/chat/completions
-    server_type: openai
-    timeout: 120
-    headers:
-      Authorization: "Bearer ${VLLM_API_KEY:}"
-```
-
----
-
-## RedisConfig
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `host` | string | `"localhost"` | Redis server host |
-| `port` | int | `6379` | Redis server port |
-| `db` | int | `0` | Redis database number |
-| `password` | string | `null` | Redis password |
-| `decode_responses` | bool | `true` | Decode Redis responses |
-| `auto_storage` | bool | `true` | Enable automatic data storage |
-| `default_ttl` | int | `3600` | Default TTL (seconds) |
-| `session_ttl` | int | `7200` | Session TTL (seconds) |
-| `cluster_mode` | bool | `false` | Use Redis cluster |
-| `cluster_nodes` | list | `[]` | Cluster node addresses (strings) |
-| `ssl` | bool | `false` | Enable TLS for Redis connection |
-| `ssl_cert_reqs` | string | `"required"` | TLS verification mode: `required` \| `optional` \| `none` |
-| `ssl_ca_certs` | string | `null` | Path to CA bundle for verifying Redis server cert |
-| `ssl_certfile` | string | `null` | Client TLS cert path (mutual TLS) |
-| `ssl_keyfile` | string | `null` | Client TLS private key path (mutual TLS) |
-| `ssl_check_hostname` | bool | `true` | Verify server hostname against certificate |
-
----
-
-## APIConfig
-
-Top-level `api:` block Configures the ADK's HTTP server.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `cors_origins` | list[string] | `[]` | Additional CORS origins, appended to the ADK's built-in defaults (`https://platform.leafcraft.ai` + localhost dev ports). Each entry must be a full origin (`scheme://host[:port]`). |
-
----
-
-## EvolutionConfig
-
-| Field | Type | Default | Accepted Values | Description |
-|-------|------|---------|-----------------|-------------|
-| `enabled` | bool | `false` | `true`, `false` | Enable evolutionary optimization |
-| `strategy` | string | `"genetic"` | free text | Evolution strategy |
-| `population_size` | int | `20` | 1+ | Population size per generation |
-| `generations` | int | `50` | 1+ | Maximum generations |
-| `mutation_rate` | float | `0.1` | 0.0 – 1.0 | Mutation probability |
-| `crossover_rate` | float | `0.7` | 0.0 – 1.0 | Crossover probability |
-| `elite_size` | int | `2` | 1+ | Elite genomes to preserve per generation |
-| `mutation_types` | list | `["prompt_variation", "temperature_adjustment", "tool_selection"]` | `prompt_variation`, `temperature_adjustment`, `tool_selection` | Mutation types |
-| `fitness_function` | string | `"task_completion_rate"` | free text | Fitness evaluation function |
-| `selection_method` | string | `"tournament"` | free text | Selection method |
-| `test_scenarios` | list | `[]` | list of scenario dicts — see below | Weighted test scenarios for fitness evaluation |
-
-### `test_scenarios` — Scenario Dict Fields
-
-Each scenario in `test_scenarios` is a dict with these fields:
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `name` | string | `"scenario_N"` | Human-readable label — shown in logs and Studio |
-| `entry_point` | string | `"test"` | Which mesh entry point to call |
-| `input` | any | `"Test scenario input"` | Input data passed to the mesh call |
-| `expected_outcome` | dict | `{}` | Key/value pairs the response must contain. All keys checked — partial matches return a partial score. |
-| `weight` | float | `1.0` | How much this scenario counts toward the overall fitness score. Higher = matters more. |
-| `timeout` | float | `30.0` | Per-scenario timeout in seconds |
-
-**Fitness formula:**
-```
-fitness = Σ (weight × scenario_score) / Σ (weights)
-```
-where `scenario_score = outcome_match_ratio × (1 − latency_penalty)`.
-
-A scenario with `weight: 2.0` counts twice as much as one with `weight: 1.0`. Timed-out scenarios score 0 and still count toward the denominator.
-
-### Example
-
-```yaml
-evolution:
-  enabled: true
-  population_size: 20
-  generations: 50
-  elite_size: 2
-  test_scenarios:
-    - name: "happy_path"
-      entry_point: "greet_user"
-      input: { "message": "I need help with my order" }
-      expected_outcome:
-        status: "success"
-      weight: 1.0
-
-    - name: "escalation_path"
-      entry_point: "greet_user"
-      input: { "message": "This is urgent and completely broken" }
-      expected_outcome:
-        escalated: true
-      weight: 2.0          # weighted heavier — escalation correctness matters more
-
-    - name: "hitl_flow"
-      entry_point: "human_contact"
-      input: { "user_message": "I want a refund" }
-      expected_outcome:
-        human_involved: true
-      weight: 1.5
-```
-
----
-
-## DataStructure
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `type` | string | **required** | `object`, `string`, `number`, `boolean`, `list` |
-| `properties` | dict | `null` | Object properties (for type=object) |
-| `required` | list | `[]` | Required field names |
-| `validation_rules` | dict | `{}` | Validation rules (key-value strings) |
-
----
-
-## Entry Points
-
-Each entry point is a named portal into the mesh.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `name` | string | **required** | Entry point name |
-| `target` | string | **required** | Target agent name |
-| `description` | string | optional | Description |
-| `condition` | string | `"always"` | Trigger condition |
-
-### Example
-
-```yaml
-entry_points:
-  - name: "greet_user"
-    target: "greeter_agent"
-    description: "Main entry — greets user and starts the agent chain"
-  - name: "direct_research"
-    target: "researcher_agent"
-    description: "Skip greeting, go straight to research"
-```
-
----
-
-## Validation Rules
-
-These are enforced by Pydantic validators in the ADK:
-
-| Rule | Constraint |
-|------|-----------|
-| `agent_type` | Must be `llm`, `human`, `programmatic`, or `external` |
-| `human_interface` | Must be `api`, `webhook`, `custom`, or `default` — anything else **raises at load** (used to fail silently at the first live request) |
-| `entry_points` targets | `target` / `target_agent` must name a real agent — a typo **raises `ConfigError` at load** instead of failing at the first `mesh_call` |
-| `model` | Unknown model id (no provider prefix, not in the catalog) **warns at load** and routes to the `local` provider — see [Model List](#model-list) |
-| prompt ↔ `yields` | A prompt committing to JSON keys with zero overlap with the `yields` schema **raises at load** (the "Hello!" silent-fallback bug class) |
-| `temperature` + `yields` | `temperature > 0.5` with a yields contract **warns** — keep ≤ ~0.3 for structured output |
-| `communication_type` | Must be `dual`, `chain`, or `execute` |
-| `optimization_strategy` | Must be `performance`, `cost`, or `speed` (or null) |
-| `max_tool_calls_per_message` | Must be 0–20 |
-| `tool_call_timeout` | Must be > 0 and <= 300 seconds |
-| `tool_choice` | Must be a non-empty string (`auto`, `none`, or tool name) |
-| `framework` | Must be `crewai`, `langgraph`, `autogen`, `a2a`, `mcp`, `zapier`, `composio`, `n8n`, `hermes`, `lyzr`, `writer`, `dify`, `flowise`, `voiceflow`, `cognigy`, `vellum`, `stackai`, `agentforce`, `watsonx`, `relevance`, `wordware`, `claude_agent`, `openai_agents`, `custom` (or null) |
-| `framework` required | When `agent_type` is `external`, `framework` must be set |
-| `integration` | Must be `zapier`, `composio`, `n8n`, `mcp` (or null) |
-| `integration` restricted | Only valid when `agent_type` is `programmatic` |
-| `is_human_powered` sync | Auto-set to `true` when `agent_type="human"`, forced to `false` when `agent_type="llm"` |
-| `AgentConfig` extras | Allows arbitrary extra fields (`extra="allow"`) |
-| `LeafMeshConfig` extras | Rejects unknown top-level keys (`extra="forbid"`) |
-
----
-
-## Field Applicability by Agent Type
-
-Shows which fields are **used** (U), **ignored** (—), or **required** (R) for each agent type.
-
-| Field | `llm` | `human` | `programmatic` | `external` |
-|-------|-------|---------|----------------|------------|
-| `name` | R | R | R | R |
-| `description` | U | U | U | U |
-| `model` | U | — | — | — |
-| `prompt` | U | — | — | — |
-| `temperature` | U | — | — | — |
-| `max_tokens` | U | — | — | — |
-| `max_completion_tokens` | U | — | — | — |
-| `reasoning` | U | — | — | — |
-| `thinking` | U | — | — | — |
-| `reasoning_budget` | U | — | — | — |
-| `enable_prompt_caching` | U | — | — | — |
-| `response_format` | U | — | — | — |
-| `optimization_strategy` | U | — | — | — |
-| `context_parts` | U | — | — | — |
-| `tools` | U | — | — | — |
-| `tool_choice` | U | — | — | — |
-| `max_tool_calls_per_message` | U | — | — | — |
-| `tool_call_timeout` | U | — | — | — |
-| `allow_parallel_tool_calls` | U | — | — | — |
-| `tool_categories` | U | — | — | — |
-| `is_human_powered` | — | auto | — | — |
-| `human_interface` | — | U | — | — |
-| `human_timeout_seconds` | — | U | — | — |
-| `human_context_template` | — | U | — | — |
-| `human_prompt_template` | — | U | — | — |
-| `fallback_on_timeout` | — | U | — | — |
-| `fallback_response` | — | U | — | — |
-| `require_human_confirmation` | — | U | — | — |
-| `human_escalation_triggers` | — | U | — | — |
-| `webhook_config` | — | U | — | — |
-| `channels` | — | U | — | — |
-| `framework` | — | — | — | R |
-| `connector_config` | — | — | — | U |
-| `integration` | — | — | U | — |
-| `communication_type` | U | U | U | U |
-| `parallel` | U | U | U | U |
-| `max_concurrent` | U | U | U | U |
-| `wake_up` | U | U | U | U |
-| `listen_events` | U | U | U | U |
-| `yields` | U | U | U | U |
-| `inputs` | U | U | U | U |
-| `can_call` | U | U | U | U |
-| `narration` | U | U | U | U |
-| `knowledge` | U | U | U | U |
-| `wait_for` | U | U | U | U |
-| `wait_for_timeout` | U | U | U | U |
-| `auto_store_response` | U | U | U | U |
-| `auto_store_yields` | U | U | U | U |
-| `memory` | U | U | U | U |
-
-**Legend:** R = required, U = used, — = ignored, auto = auto-set
+> This section previously inlined a full copy of `agent-config-fields.md`. The copy was **removed** because it drifted out of sync with the source (diverging `tool_choice` defaults, missing LLM fields, stale `skills`/`session_ttl`/`super_agent` claims). There is now a single source of truth — always consult `agent-config-fields.md` for field-level questions.

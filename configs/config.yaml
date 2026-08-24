@@ -1,12 +1,23 @@
-# quote-to-cash — Quote to Cash (pricing & quote)
+# quote-to-cash — Quote-to-Cash Pod
 #
-# price × goods. RFQ → cost calc → discount policy → approval → quote.
-# The amount × margin × discount approval matrix is declared as wire
-# conditions on discount_policy_agent — read that block to see the
-# whole approval policy. HITL on every tier (rep → deal_desk →
-# finance → CFO). System-of-record agents (price book, redline
-# ledger, competitor watch) are connector-YAML: point them at YOUR
-# CPQ / CLM / price-intelligence stack via env vars.
+# A pod of five digital employees + five human roles that runs a deal from
+# an RFQ all the way to CASH: RFQ -> shape a priced, policy-compliant deal
+# (super-agent) -> approval matrix (rep / deal-desk / finance / CFO) ->
+# draft -> ISSUE the quote artifact (finisher, fail-closed) -> invoice ->
+# dun the overdue backlog.
+#
+# The pod is a TEAM, not a pipeline. Every wire is conditional; every
+# hand-off is a finished contract; every human gate default-denies on
+# silence; the finisher produces the real artifact and fails closed; the
+# WORM sink is the terminus. Systems (CPQ / ERP / CLM / billing) are TOOLS
+# inside agents, never members.
+#
+# The amount x margin x discount approval matrix is declared as wire
+# conditions on cass_shaper_agent — read that block to see the whole
+# approval policy in one place.
+#
+# Design doctrine: .claude/skills/leafmesh/building-agents-thoroughly.md
+# Field reference:  .claude/skills/leafmesh/agent-config-fields.md
 
 name: "quote-to-cash"
 version: "1.0.0"
@@ -15,477 +26,381 @@ environment: "development"
 debug: true
 log_level: "INFO"
 
-redis:
-  host: "${REDIS_HOST:localhost}"
-  port: ${REDIS_PORT:6379}
-  db: 0
-  password: "${REDIS_PASSWORD:}"
-  auto_storage: true
-  decode_responses: true
-  default_ttl: 86400
-  session_ttl: 604800
+persistence:
+  backend: redis
+  redis:
+    host: "${REDIS_HOST:localhost}"
+    port: ${REDIS_PORT:6379}
+    db: 0
+    password: "${REDIS_PASSWORD:}"
+    auto_storage: true
+    decode_responses: true
+    default_ttl: 86400
+    session_ttl: 604800
 
 auto_discover:
   directory: "./agency"
   pattern: "*_agent.py"
   recursive: false
 
+# The Manager is the SUPERVISOR — it watches every hand-off and escalates
+# stalls / contract violations / repeated errors to the RevOps Lead. It is
+# not a router in the middle of the team.
 manager:
-  enabled: true
   model: "gpt-4o-mini"
   domain: "generic"
-  can_intervene: true
   prompt: |
-    Quote-to-cash mesh. Successful turn:
-      - rfq_ingester normalises the inbound RFQ
-      - cost_calculator pulls COGS from the CPQ/ERP price-book connector
-      - discount_policy_agent applies the tier matrix; its outbound
-        wires ARE the approval matrix (amount × margin × discount →
-        rep / deal_desk / finance / cfo)
-      - sales rep / deal desk / finance approver / CFO HITL
-      - quote_drafter assembles the quote after the human gate
-
-    Escalate when:
-      - margin below floor (% set by env)
-      - discount exceeds tier-N max
-      - bundled items with regulated-pricing components
-
+    This mesh runs quote-to-cash. A deal flows RFQ -> Cass (shape a priced,
+    policy-compliant deal) -> the approval matrix on Cass's wires routes it
+    to exactly ONE human tier (rep / deal-desk / finance / CFO) -> the
+    drafter assembles the quote -> the issuer renders + issues the artifact,
+    failing closed on any under-approved deal -> billing invoices accepted
+    quotes and duns the overdue backlog. Escalate to the RevOps Lead when: a
+    deal loops on rework past its bound, margin falls below floor or a
+    discount exceeds tier, an approval round times out, billing surfaces a
+    severely overdue account, or any agent hands off a malformed artifact.
+    Silence never advances a deal.
   routing:
-    mode: "learning"
-    memory_size: 200
-    confidence_threshold: 0.7
-    fallback: "all"
-    decay_days: 30
-
-  knowledge:
-    serviceName: "mongo_main"
-    enabled: true
-    groupName: "pricing_runbook"
-
+    mode: static
   escalation:
     targets:
-      - type: "human_agent"
-        agent: "finance_approver_human"
-      - type: "webhook"
-        url: "${PAGER_WEBHOOK:https://events.pagerduty.com/v2/enqueue}"
-        method: "POST"
-        headers:
-          Content-Type: "application/json"
-        payload_template:
-          incident_id: "{{quote_id}}"
-          severity: "{{severity}}"
-          message: "{{message}}"
-          session_id: "{{session_id}}"
-      - type: "channel"
-        provider: "slack"
-        channel_id: "${SLACK_PRICING_CHANNEL:}"
-        message_template: "[pricing] {{message}} — quote {{quote_id}}"
+      - type: human_agent
+        agent: revops_lead_human
     auto_escalate:
-      max_retries: 2
-      max_errors_per_session: 3
+      max_retries: 3
+      max_errors_per_session: 5
       timeout_threshold: 2
 
-  health_check_interval: 60
-  agent_timeout_threshold: 300
-  chain_completion_timeout: 600
-
 mesh:
-  call_timeout: 120
+  call_timeout: 150
 
-data_structures:
-  RFQ:
-    type: "object"
-    properties:
-      rfq_id: { type: "string" }
-      customer_id: { type: "string" }
-      line_items: { type: "list" }
-      target_close: { type: "string" }
-      received_at_utc: { type: "string" }
-    required: ["rfq_id"]
+# 2.4.131 runtime block — deal shaping (super-agent, many SKUs + competitive
+# signals) and Claude drafting can run long. Everything else stays default
+# (omission is meaningful; we do not pre-fill defaults). The `timeouts` block
+# is rejected by <=2.4.130, so it lands WITH the 2.4.131 floor.
+timeouts:
+  llm_hard_timeout_s: 300
 
+# ── Entry points — one per real-world trigger ────────────────────────────────
 entry_points:
   - name: "rfq_email"
-    target: "rfq_ingester_agent"
-    description: "RFQ via email"
-
+    target: "quinn_coordinator_agent"
+    description: "An RFQ arrives by email — Quinn opens the deal."
+    condition: always
   - name: "cpq_event"
-    target: "rfq_ingester_agent"
-    description: "CPQ system event"
-
+    target: "quinn_coordinator_agent"
+    description: "A CPQ/CRM system event starts a deal."
+    condition: always
   - name: "rep_initiated"
-    target: "rfq_ingester_agent"
-    description: "Sales-rep-initiated RFQ"
-
-  - name: "competitor_price_change"
-    target: "discount_policy_agent"
-    description: "Competitor-price webhook — refresh discount tiers"
-
-  - name: "manual_action"
-    target: "rfq_ingester_agent"
-    description: "Deal-desk-initiated"
-
-  - name: "redline_open"
-    target: "contract_redline_tracker_agent"
-    description: "Open a new contract redline"
-
-  - name: "redline_update"
-    target: "contract_redline_tracker_agent"
-    description: "Update an existing redline"
-
-  - name: "redline_morning_brief"
-    target: "contract_redline_tracker_agent"
-    description: "Deal-desk standup — stalled redline report"
-
-  - name: "rev_rec_classify"
-    target: "deal_compliance_agent"
-    description: "Classify a quote per ASC 606 — POs, allocation, recognition pattern (deal_compliance, mode: rev_rec)"
-
-  - name: "bundle_suggestion"
-    target: "bundle_recommender_agent"
-    description: "RFQ in flight — suggest adjacent SKUs (cross-sell)"
-
-  - name: "renewal_uplift_bundle"
-    target: "bundle_recommender_agent"
-    description: "Renewal up for quote — propose uplift bundle (add-ons + tier bump)"
-
-  - name: "expansion_cross_sell"
-    target: "bundle_recommender_agent"
-    description: "Existing customer crossed usage threshold — cross-sell next product line"
-
-
-# ── Direct-call entry points (every non-human, non-terminal
-#    agent is API-addressable; bypasses the upstream chain).
-#    Use for ad-hoc invocation, debugging, programmatic ingest.
-  - name: "direct_call_cost_calculator"
-    target: "cost_calculator_agent"
-    description: "On-demand direct call to cost_calculator (programmatic) — bypasses upstream chain"
-
-  - name: "direct_call_quote_drafter"
-    target: "quote_drafter_agent"
-    description: "On-demand direct call to quote_drafter (llm) — bypasses upstream chain"
-
-  - name: "direct_call_quote_issuer"
-    target: "quote_issuer_agent"
-    description: "On-demand direct call to quote_issuer (programmatic) — renders + issues the approved quote artifact; bypasses upstream chain"
-
-  - name: "direct_call_competitor_watch"
-    target: "competitor_watch_agent"
-    description: "On-demand direct call to competitor_watch (programmatic) — bypasses upstream chain"
-
-  # ── Lyzr-inspired agents (added in 2.3.x) ──
-  - name: "direct_call_deal_compliance"
-    target: "deal_compliance_agent"
-    description: "Playbook-based clause review on a quote/contract — before CFO sign-off (deal_compliance, mode: contract_review)"
-
+    target: "quinn_coordinator_agent"
+    description: "A sales rep starts an RFQ by hand."
+    condition: always
+  - name: "deal_status"
+    target: "quinn_coordinator_agent"
+    description: "Anyone asks 'where is my quote?' — Quinn answers from the case record."
+    condition: always
+  - name: "quote_accepted"
+    target: "billing_agent"
+    description: "The customer accepted a quote — raise the invoice (billing, invoice mode)."
+    condition: always
+  - name: "dunning_sweep"
+    target: "billing_agent"
+    description: "Scheduled/manual sweep of overdue invoices (billing, dun mode)."
+    condition: always
+  # ── HITL resume — a human answers in the channel they were notified in ──
+  - name: "rep_reply"
+    target: "sales_rep_human"
+    description: "HITL resume — the sales rep approves / rejects / resubmits."
+    condition: always
+  - name: "deal_desk_reply"
+    target: "deal_desk_human"
+    description: "HITL resume — deal desk decides."
+    condition: always
+  - name: "finance_reply"
+    target: "finance_approver_human"
+    description: "HITL resume — finance decides."
+    condition: always
+  - name: "cfo_reply"
+    target: "cfo_human"
+    description: "HITL resume — CFO decides."
+    condition: always
+  - name: "revops_reply"
+    target: "revops_lead_human"
+    description: "HITL resume — the RevOps Lead resolves an escalation."
+    condition: always
 
 agents:
 
-  # ────────────────────────────────────────────────────────────
-  # rfq_ingester_agent — RFQ intake registrar, with a deterministic
-  # completeness floor. Backed by agency/rfq_ingester_agent.py:
-  #   @pre_compose load_customer_intel — pulls this customer's deal
-  #                history + any prior RFQs from the system of record, so
-  #                the registrar ingests against what we already know
-  #                about the account (returning customer, prior open RFQ)
-  #                instead of treating every RFQ as a cold inbound.
-  #   @chain enforce_completeness_floor — FORCES is_complete in code from
-  #                the presence of a customer + at least one line item. An
-  #                RFQ missing customer OR line_items is forced incomplete
-  #                and routed BACK to the sales rep — never downstream to
-  #                costing on bad data. The LLM cannot declare a headless
-  #                RFQ ready to cost.
-  # DEV: deal history is seeded in agency/_shared/store.py so the chain
-  # runs day-0 with NO connector. PROD: wire your CPQ/CRM (deal history +
-  # prior RFQs) connector inside load_customer_intel — the completeness
-  # floor still applies on top.
-  # ────────────────────────────────────────────────────────────
-  rfq_ingester_agent:
-    name: "rfq_ingester_agent"
+  # ─────────────────────────────────────────────────────────────────────────
+  # Quinn — Deal Coordinator (AI). Owns the deal end to end: opens the case,
+  # orchestrates the pod, keeps live status, is the single point of contact.
+  # Pure orchestration — never prices, never approves, never issues. (Pure
+  # YAML — no agency/quinn_coordinator_agent.py; runs as a plain LLM agent.)
+  # ─────────────────────────────────────────────────────────────────────────
+  quinn_coordinator_agent:
+    name: "quinn_coordinator_agent"
     agent_type: "llm"
-    description: "Normalises the inbound RFQ against this customer's deal history; a code floor forces incomplete RFQs back to the rep"
+    communication_type: "chain"
     model: "gpt-4o-mini"
     temperature: 0.1
     max_tokens: 1000
-    communication_type: "chain"
+    description: "Deal Coordinator — opens the case, orchestrates, keeps status, single point of contact."
     prompt: |
-      Normalise the RFQ. Extract customer_id, line_items
-      (sku, qty, list_price_cents), target_close.
+      You are Quinn, the Deal Coordinator. You OWN each deal from the moment
+      an RFQ arrives to the moment it is cash. You orchestrate the pod and
+      keep everyone informed — you never price a deal, draft a quote, or
+      approve anything yourself.
 
-      context["prepared_data"] carries this customer's deal history and
-      any prior RFQs we have on file — use it to recognise a returning
-      customer or a duplicate of an open RFQ.
+      On a new RFQ: open the case, echo the RFQ fields unchanged, and hand it
+      to Cass to shape. On a status ask: answer the current stage / waiting-on
+      / next gate from the case record — nothing invented. Route anything that
+      needs a human owner's judgement (a stuck deal, a policy question) to the
+      RevOps Lead; never make the pricing or policy call yourself.
 
-      Return JSON with these keys (all required):
-        - "rfq_id": echo rfq_id from the input unchanged; when the
-          input has no rfq_id, generate one as "rfq-" followed by 10
-          lowercase hex characters
-        - "customer_id": echo customer_id from the input unchanged
-          ("" when missing)
-        - "line_items": list ([] when none found)
-        - "target_close": string ("" when missing)
-
-      NOTE: a deterministic code floor RECOMPUTES is_complete from the
-      presence of a customer + at least one line item, sets missing_fields
-      and intake_status, and routes an incomplete RFQ back to the sales
-      rep — so you cannot mark a headless RFQ ready to cost. Normalise
-      honestly.
+      Set "action" to one of: open_case | status | escalate. Echo rfq_id,
+      customer_id, line_items, target_close, segment from the input unchanged
+      (use "" / [] when a field is missing).
 
       OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
-      {"rfq_id": "", "customer_id": "", "line_items": [], "target_close": "", "is_complete": false, "missing_fields": [], "intake_status": "incomplete", "completeness_floor_applied": false}
-    enforce_yields: true
-    enforce_yields_retry: 2
+      {"action": "", "rfq_id": "", "customer_id": "", "line_items": [], "target_close": "", "segment": "", "stage": "", "waiting_on": "", "summary": ""}
     yields:
+      action: "string"          # open_case | status | escalate
       rfq_id: "string"
       customer_id: "string"
       line_items: "list"
       target_close: "string"
-      is_complete: "boolean"              # FORCED by the @chain floor — gates routing below
-      missing_fields: "list"              # which required fields are absent (floor)
-      intake_status: "string"             # "complete" | "incomplete" (floor)
-      completeness_floor_applied: "boolean"   # floor ran
+      segment: "string"
+      stage: "string"
+      waiting_on: "string"
+      summary: "string"
     inputs:
       payload: "object"
     can_call:
-      # Complete RFQ (customer + line items present) → costing.
-      - agent: "cost_calculator_agent"
-        condition: "calling_agent_response.is_complete == true"
-      # Incomplete RFQ → BACK to the sales rep for rework. Deterministic
-      # floor (enforce_completeness_floor) — never passed to costing.
-      - agent: "sales_rep_human"
-        condition: "calling_agent_response.is_complete == false"
+      - agent: "cass_shaper_agent"
+        condition: "calling_agent_response.action == 'open_case'"
+      - agent: "revops_lead_human"
+        condition: "calling_agent_response.action == 'escalate'"
 
-  # ────────────────────────────────────────────────────────────
-  # cost_calculator_agent — COGS + list totals + margin, with a
-  # deterministic cost floor. Backed by agency/cost_calculator_agent.py:
-  #   @pre_compose load_price_book — pulls per-SKU unit cost + unit list
-  #                for the RFQ's SKUs from the price book of record.
-  #   @chain enforce_cost_floor — RECOMPUTES total_cogs / total_list /
-  #                gross_margin from line_items × the price book, and sets
-  #                has_regulated_sku. The LLM's numbers are advisory; the
-  #                floor owns the cost basis that gates a downstream
-  #                sign-off, so a bad parse still yields correct costs.
-  # DEV: the price book is seeded in agency/_shared/store.py so the chain
-  # runs day-0 with NO connector. PROD: point the CPQ/ERP MCP server
-  # (${CPQ_MCP_URL}) at your price book inside load_price_book — the
-  # recompute floor still applies on top.
-  # ────────────────────────────────────────────────────────────
-  cost_calculator_agent:
-    name: "cost_calculator_agent"
+  # ─────────────────────────────────────────────────────────────────────────
+  # Cass — Costing & Deal Shaper (AI, SUPER-AGENT). Turns a raw RFQ into a
+  # priced, policy-compliant deal: plans the pricing across the SKUs, pulls the
+  # price book / deal history / competitor signals through its tools, and
+  # shapes a discount within policy. super_agent = autonomous plan/execute/
+  # verify across many SKUs + competitive signals. @chain = the pricing +
+  # completeness floors (fail closed). Its outbound wires ARE the approval
+  # matrix (amount x margin x discount -> rep / deal-desk / finance / CFO).
+  # Backed by agency/cass_shaper_agent.py.
+  # ─────────────────────────────────────────────────────────────────────────
+  cass_shaper_agent:
+    name: "cass_shaper_agent"
     agent_type: "llm"
-    description: "COGS + list + margin from the price book of record (seeded dev store; CPQ/ERP MCP in prod); a code floor recomputes the cost basis"
-    model: "gpt-4o-mini"
-    temperature: 0.0
-    max_tokens: 1200
     communication_type: "chain"
+    model: "claude-sonnet-4-6"
+    temperature: 0.1
+    max_tool_calls_per_message: 15   # a deal has many SKUs + signals; default 5 truncates silently
+    description: "Costing & Deal Shaper — costs the RFQ, shapes a policy-compliant discount; a code floor recomputes the basis the approval matrix routes on."
+    super_agent:                     # DICT form = the tuning path (2.4.123+); the ONLY way to tune it
+      cost_ceiling: 100000
+      wall_clock: 900
     prompt: |
-      You are the cost analyst. context["prepared_data"] carries the
-      price book (per-SKU unit_cost_cents + unit_list_cents) for this
-      RFQ's SKUs. Cost the line items.
+      You are Cass, the Costing & Deal Shaper. Your job is to turn a raw RFQ
+      into a priced, policy-compliant deal — and to REFUSE to guess a cost
+      basis. Pull the price book for every SKU, this customer's deal history,
+      and competitor pricing through your tools BEFORE you price anything.
+      Then shape a discount that is defensible against the competitive picture
+      and the account's history — within policy.
 
-      Return JSON with these keys (all required):
-        - "total_cogs_cents": sum of unit_cost_cents × qty across line items
-        - "total_list_cents": sum of unit_list_cents × qty across line items
-        - "gross_margin_pct": (total_list - total_cogs) / total_list, 0..1
+      NEVER invent a cost or list price no price book shows. An RFQ with no
+      customer or no line-items is INCOMPLETE — say so honestly; a code floor
+      routes it back to the rep for rework. Load the `quote` playbook for the
+      read-before-price order and the `approve` playbook to read which tier
+      the deal will route to.
 
-      NOTE: a deterministic code floor RECOMPUTES all three from the
-      price book × line items and sets has_regulated_sku — so cost
-      honestly; you cannot move a margin to dodge a sign-off tier.
-
-      OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
-      {"total_cogs_cents": 0, "total_list_cents": 0, "gross_margin_pct": 0, "line_items": [], "has_regulated_sku": false, "cost_floor_applied": false}
-    enforce_yields: true
-    enforce_yields_retry: 1
-    knowledge:
-      serviceName: "mongo_main"
-      enabled: true
-      groupName: "price_book"
-    yields:
-      total_cogs_cents: "number"
-      total_list_cents: "number"
-      gross_margin_pct: "number"
-      has_regulated_sku: "boolean"     # set by the @chain floor from the price book
-      cost_floor_applied: "boolean"    # floor ran
-      line_items: "list"               # passed through for discount_policy's intel pull
-    inputs:
-      line_items: "list"
-    can_call:
-      - agent: "discount_policy_agent"
-
-  # ────────────────────────────────────────────────────────────
-  # discount_policy_agent — discount tier + THE APPROVAL MATRIX,
-  # with a deterministic discount floor. Backed by
-  # agency/discount_policy_agent.py:
-  #   @pre_compose load_deal_intel — pulls this customer's deal history,
-  #                competitor pricing for the SKUs, and the discount
-  #                policy table so the strategist reasons over real data.
-  #   @chain enforce_discount_floor — CLAMPS discount to 0..1, DERIVES
-  #                tier from the policy bands (the model can't mislabel a
-  #                35% discount tier_2), and RECOMPUTES gross_margin_pct
-  #                as the POST-DISCOUNT margin from the cost basis. These
-  #                three keys drive the approval matrix below, so the gate
-  #                fires on COMPUTED numbers — a deep discount that pushes
-  #                margin below floor forces the CFO tier deterministically.
-  #   @compose — the human approver gets a focused approval brief; the
-  #                quote writer gets the full deal package.
-  # The agent body also STASHES the full deal pre-gate (the SDK resumes a
-  # chain after a human gate with only the human's response).
-  # A sales controller can still read the whole policy on the wires below.
-  # ────────────────────────────────────────────────────────────
-  discount_policy_agent:
-    name: "discount_policy_agent"
-    agent_type: "llm"
-    description: "Picks discount tier per customer + competitive signals; a code floor derives the tier + post-discount margin the approval matrix routes on"
-    model: "gpt-4o-mini"
-    temperature: 0.0
-    max_tokens: 600
-    communication_type: "chain"
-    prompt: |
-      Pick the discount tier for this deal. context["prepared_data"]
-      carries this customer's deal history, competitor pricing for the
-      requested SKUs, and the discount policy table — reason over them.
-      Return JSON with these keys:
-        - "discount_pct": the discount fraction — must be between 0
-          and 1 (clamp anything outside that range)
-        - "tier": your read of the tier — tier_1 (0 to 0.10) |
-          tier_2 (over 0.10 to 0.20) | tier_3 (over 0.20 to 0.30) |
-          tier_4 (over 0.30, CFO required)
-        - "rationale": factors driving the discount (customer history,
-          competitive signal, deal size, strategic account)
-        - "deal_desk_briefing": 2-3 sentence narrative for the approver.
-          Lead with discount + tier. Cite the strongest 1 reason.
-          Recommend approve vs negotiate down. When you have nothing
-          specific, write: "Discount <pct>% (<tier>). No specific
-          rationale captured." plus "CFO approval required." for tier_4
-          or "Within deal-desk authority." otherwise.
-        - "total_list_cents": echo total_list_cents from the input
-          unchanged (0 when missing)
-        - "gross_margin_pct": echo gross_margin_pct from the input
-          unchanged (0 when missing)
-        - "rfq_id": echo rfq_id from the input unchanged ("" when missing)
-
-      NOTE: a deterministic code floor CLAMPS discount_pct, DERIVES tier
-      from the policy bands, and RECOMPUTES gross_margin_pct as the
-      post-discount margin — these drive the approval matrix, so you
+      NOTE: a deterministic code floor RECOMPUTES total_cogs / total_list /
+      margin from the price book x line-items, CLAMPS discount to 0..1,
+      DERIVES the tier from the policy bands, and recomputes gross_margin_pct
+      as the POST-DISCOUNT margin — these drive the approval matrix, so you
       cannot move a deal below its sign-off tier. Price honestly.
 
       OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
-      {"discount_pct": 0, "tier": "", "rationale": "", "deal_desk_briefing": "", "total_list_cents": 0, "gross_margin_pct": 0, "rfq_id": "", "discount_floor_applied": false}
-    enforce_yields: true
-    enforce_yields_retry: 2
-    knowledge:
-      serviceName: "mongo_main"
-      enabled: true
-      groupName: "discount_policy"
+      {"rfq_id": "", "customer_id": "", "segment": "", "line_items": [], "discount_pct": 0, "rationale": "", "deal_desk_briefing": "", "total_cogs_cents": 0, "total_list_cents": 0, "gross_margin_pct": 0, "tier": "", "has_regulated_sku": false, "is_complete": false, "missing_fields": [], "intake_status": "incomplete", "rework_round": 0, "rework_exhausted": false, "pricing_floor_applied": false}
     yields:
+      rfq_id: "string"
+      customer_id: "string"
+      segment: "string"
+      line_items: "list"
       discount_pct: "number"          # clamped 0..1 by the @chain floor
-      tier: "string"                  # derived from policy bands by the floor
       rationale: "string"
       deal_desk_briefing: "string"
-      total_list_cents: "number"      # from the cost basis — drives the matrix below
-      gross_margin_pct: "number"      # POST-DISCOUNT margin (floor) — drives the matrix below
-      rfq_id: "string"                # identity passthrough — the approver sees WHICH quote
-      discount_floor_applied: "boolean"   # floor ran
+      total_cogs_cents: "number"      # recomputed from the price book (floor)
+      total_list_cents: "number"      # recomputed from the price book (floor) — drives the matrix
+      gross_margin_pct: "number"      # POST-DISCOUNT margin (floor) — drives the matrix
+      tier: "string"                  # derived from the policy bands (floor)
+      has_regulated_sku: "boolean"    # set from the price book (floor)
+      is_complete: "boolean"          # FORCED by the completeness floor — gates routing below
+      missing_fields: "list"          # which required fields are absent (floor)
+      intake_status: "string"         # complete | incomplete (floor)
+      rework_round: "number"          # bounded back-edge counter (floor)
+      rework_exhausted: "boolean"     # rework bound hit -> terminal route (floor)
+      pricing_floor_applied: "boolean"
     inputs:
-      upstream_yields: "object"
+      payload: "object"
+      line_items: "list"
+    # Playbook — the CRAFT, fetched on demand. Only `description` rides in the
+    # prompt; `responsibility` is loaded when the model recognises the intent.
+    playbook:
+      - intent: quote
+        description: "How to shape and price a compliant quote from an RFQ."
+        responsibility: |
+          1. Pull the price book for EVERY SKU FIRST (read_price_book), then
+             the customer's deal history (read_deal_history) and competitor
+             signals (read_competitor_prices) — you cannot price a deal you
+             have not fully costed, and you cannot justify a discount without
+             the competitive picture.
+          2. Compute the list total and the cost basis from the price book,
+             not from numbers in the RFQ text. Choose a discount that answers
+             the strongest real competitive threat and respects the account's
+             prior discounts — never a round number for its own sake.
+          3. If a SKU is regulated, flag it — regulated components change the
+             sign-off path.
+          4. An RFQ with no customer or no line-items is INCOMPLETE. Say so;
+             do not price a headless RFQ.
+        variables: [rfq_id]
+      - intent: approve
+        description: "How to prepare the approval brief and read the tier the deal routes to."
+        responsibility: |
+          1. The deal routes to exactly ONE tier by amount x margin x
+             discount: rep (small, healthy, <=10% off), deal desk (>10% off or
+             >$25K), finance (>20% off or >$100K), CFO (below margin floor or
+             >30% off or >$1M). Write the deal_desk_briefing to LEAD with the
+             discount + tier and cite the single strongest reason.
+          2. Recommend approve vs negotiate-down. State plainly when the tier
+             is CFO ("CFO approval required.") vs within deal-desk authority.
+          3. Never soften a below-floor margin to dodge a tier — the code
+             floor recomputes it anyway and the gate fires on the computed
+             number.
+        variables: [rfq_id, tier]
+    # Day-0 tool surface — reads the seed price book / history / competitor
+    # store so the pod runs with NO connector wired. Each tool announces
+    # itself (available:false) when it has no real source. See agency/tools.py.
+    tools: [read_price_book, read_deal_history, read_competitor_prices]
+    tool_categories: [shaping]
+    # ── To wire a real CPQ/ERP price book, uncomment and set the URL (each
+    #    named action under `use:` becomes its own tool, e.g. cpq_read_price_book).
+    #    NOTE: the SDK rejects an http mcp block with an EMPTY url at load, so
+    #    this ships COMMENTED — fill the URL, then uncomment. ──
+    # mcp:
+    #   - transport: http
+    #     url: "${CPQ_MCP_URL}"
+    #     token: "${CPQ_MCP_TOKEN:}"
+    #     use: [read_price_book, read_deal_history, read_competitor_prices]
+    #     name: cpq
+    #     timeout: 30
     can_call:
-      # ══ APPROVAL MATRIX (amount × margin × discount) ══════════
-      # Thresholds (cents): rep ≤ $25K (2_500_000) < deal_desk ≤
-      # $100K (10_000_000) < finance ≤ $1M (100_000_000) < CFO.
-      # Margin floor 20% (0.20); discount bands 10% / 20% / 30%.
-      # The four conditions are mutually exclusive and exhaustive —
-      # exactly one human tier fires per deal.
-      # ══════════════════════════════════════════════════════════
+      # ══ APPROVAL MATRIX (amount x margin x discount) ══════════════════════
+      # Thresholds (cents): rep <= $25K (2_500_000) < deal_desk <= $100K
+      # (10_000_000) < finance <= $1M (100_000_000) < CFO. Margin floor 20%
+      # (0.20); discount bands 10% / 20% / 30%. Every matrix wire also requires
+      # is_complete == true, so an incomplete RFQ never reaches an approver.
+      # The four tiers are mutually exclusive + exhaustive — exactly one fires.
+      # ══════════════════════════════════════════════════════════════════════
 
       # CFO — margin below the 20% floor OR discount > 30% OR list > $1M
       - agent: "cfo_human"
-        condition: "calling_agent_response.gross_margin_pct < 0.20 or calling_agent_response.discount_pct > 0.30 or calling_agent_response.total_list_cents > 100000000"
+        condition: "calling_agent_response.is_complete == true and (calling_agent_response.gross_margin_pct < 0.20 or calling_agent_response.discount_pct > 0.30 or calling_agent_response.total_list_cents > 100000000)"
 
       # Finance — discount > 20% OR list > $100K (and not CFO-bound)
       - agent: "finance_approver_human"
-        condition: "calling_agent_response.gross_margin_pct >= 0.20 and calling_agent_response.discount_pct <= 0.30 and calling_agent_response.total_list_cents <= 100000000 and (calling_agent_response.discount_pct > 0.20 or calling_agent_response.total_list_cents > 10000000)"
+        condition: "calling_agent_response.is_complete == true and calling_agent_response.gross_margin_pct >= 0.20 and calling_agent_response.discount_pct <= 0.30 and calling_agent_response.total_list_cents <= 100000000 and (calling_agent_response.discount_pct > 0.20 or calling_agent_response.total_list_cents > 10000000)"
 
       # Deal desk — discount > 10% OR list > $25K (and not finance/CFO-bound)
       - agent: "deal_desk_human"
-        condition: "calling_agent_response.gross_margin_pct >= 0.20 and calling_agent_response.discount_pct <= 0.20 and calling_agent_response.total_list_cents <= 10000000 and (calling_agent_response.discount_pct > 0.10 or calling_agent_response.total_list_cents > 2500000)"
+        condition: "calling_agent_response.is_complete == true and calling_agent_response.gross_margin_pct >= 0.20 and calling_agent_response.discount_pct <= 0.20 and calling_agent_response.total_list_cents <= 10000000 and (calling_agent_response.discount_pct > 0.10 or calling_agent_response.total_list_cents > 2500000)"
 
       # Rep self-approval — small, healthy-margin, low-discount deals
       - agent: "sales_rep_human"
-        condition: "calling_agent_response.gross_margin_pct >= 0.20 and calling_agent_response.discount_pct <= 0.10 and calling_agent_response.total_list_cents <= 2500000"
+        condition: "calling_agent_response.is_complete == true and calling_agent_response.gross_margin_pct >= 0.20 and calling_agent_response.discount_pct <= 0.10 and calling_agent_response.total_list_cents <= 2500000"
 
-  quote_drafter_agent:
-    name: "quote_drafter_agent"
+      # ══ BOUNDED REWORK BACK-EDGE ══════════════════════════════════════════
+      # Incomplete RFQ -> back to the rep to fix (rework). The counter in the
+      # floor bounds it: once rework_exhausted is true, the deal goes TERMINAL
+      # to the RevOps Lead instead of looping rep<->shaper forever.
+      - agent: "sales_rep_human"
+        condition: "calling_agent_response.is_complete == false and calling_agent_response.rework_exhausted == false"
+      - agent: "revops_lead_human"
+        condition: "calling_agent_response.rework_exhausted == true"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Drafter — Quote Drafter (AI). Runs AFTER a human tier approves: assembles
+  # the quote body (pricing table, terms, validity, next steps) and renders a
+  # DRAFT to ./out, then hands to the issuer. Deliberately SEPARATE from the
+  # issuer (the writer is not the actuator). @chain caps validity by tier (a
+  # deeper discount gets a shorter shelf life) — fail closed. Backed by
+  # agency/drafter_agent.py.
+  # ─────────────────────────────────────────────────────────────────────────
+  drafter_agent:
+    name: "drafter_agent"
     agent_type: "llm"
-    description: "Assembles the final quote"
+    communication_type: "chain"
     model: "gpt-4o-mini"
     temperature: 0.1
     max_tokens: 1500
-    communication_type: "chain"
+    description: "Quote Drafter — assembles the approved quote body + validity and renders a draft to ./out; a code floor caps validity by tier."
     prompt: |
-      Draft the quote. Sections: pricing table, terms, validity,
-      next steps. Never auto-send — sales rep reviews + sends.
+      You are the Quote Drafter. A deal has been APPROVED. Assemble the quote
+      body — a pricing table, terms, validity window, and next steps. Never
+      auto-send; the issuer produces the issued artifact.
 
       NOTE: a deterministic code floor CAPS validity_days by the deal's
-      discount tier (deeper discounts get a shorter shelf life), so don't
-      grant a long validity to a steep discount.
-
-      Return JSON with these keys (all required):
-        - quote_body: string
-        - validity_days: number
+      discount tier (deeper discounts get a shorter shelf life) and renders
+      the draft to ./out — so don't grant a long validity to a steep discount.
 
       OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
-      {"quote_body": "", "validity_days": 0, "validity_floor_applied": false}
-    enforce_yields: true
-    enforce_yields_retry: 1
+      {"quote_body": "", "validity_days": 0, "tier": "", "rfq_id": "", "customer_id": "", "drafted": false, "artifact_path": "", "validity_floor_applied": false}
     yields:
       quote_body: "string"
       validity_days: "number"          # capped by tier by the @chain floor
+      tier: "string"
+      rfq_id: "string"
+      customer_id: "string"
+      drafted: "boolean"               # set by the floor once the draft renders
+      artifact_path: "string"          # ./out/<rfq>_quote_draft.md
       validity_floor_applied: "boolean"
     inputs:
       upstream_yields: "object"
     can_call:
-      # The drafter assembles the body; the ISSUER renders + issues the
-      # real quote artifact from the approved pricing. Drafter is only
-      # reached on an approve route, so issuance runs post-approval.
+      # The drafter assembles the body; the ISSUER renders + issues the real
+      # quote artifact from the approved pricing (finisher, fail-closed).
       - agent: "quote_issuer_agent"
+        condition: "calling_agent_response.drafted == true"
 
-  # ────────────────────────────────────────────────────────────
-  # quote_issuer_agent — the ARTIFACT-PRODUCING EXECUTOR that
-  # FINISHES the job. Runs AFTER the quote is approved and drafted,
-  # and GENERATES + ISSUES the quote document from the approved
-  # pricing/discount/validity. Backed by agency/quote_issuer_agent.py:
-  #   body  — recovers the deal (line items, totals, discount, tier)
-  #           from the per-session stash + the drafter's yields, builds
-  #           the priced quote, RENDERS it to ./out/<quote_id>.pdf
-  #           (ReportLab if available, else a deterministic .md file —
-  #           always a real artifact on disk, day-0, no extra deps),
-  #           and PUSHES to your CPQ via ${CPQ_WEBHOOK_URL:} (inert until
-  #           set; a dev-store fallback records the issued quote so the
-  #           chain is observable out of the box).
-  #   @chain enforce_issuance_floor — FAIL-CLOSED: never issues a quote
-  #           that wasn't approved, or whose discount TIER wasn't cleared
-  #           by the REQUIRED approver (the required approver is re-derived
-  #           in code from the financials — the same amount × margin ×
-  #           discount matrix the discount_policy wires encode). On a trip
-  #           the artifact is deleted and the result marked blocked.
-  # PROD: set CPQ_WEBHOOK_URL to your CPQ create-quote webhook (Salesforce
-  # CPQ / DealHub / Conga) — the dev store then becomes a no-op fallback.
-  # ────────────────────────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────────────────
+  # quote_issuer_agent — the ARTIFACT-PRODUCING EXECUTOR (FINISHER). Runs after
+  # the deal is approved + drafted and GENERATES + ISSUES the quote as a real
+  # artifact to ./out/<quote>.pdf (ReportLab if present, else a deterministic
+  # .md — always a real file, day-0, no extra deps), plus a CPQ push via
+  # ${CPQ_WEBHOOK_URL:} (inert until set; a dev-store fallback records the
+  # issued quote). Backed by agency/quote_issuer_agent.py:
+  #   @chain enforce_issuance_floor — FAIL CLOSED: never issues a quote that
+  #     wasn't approved, or whose discount TIER wasn't cleared by the REQUIRED
+  #     approver — re-derived IN CODE from the financials (the same matrix
+  #     Cass's wires encode). On a trip the artifact is DELETED and the result
+  #     marked blocked. The WORM sink still records the attempt.
+  # ─────────────────────────────────────────────────────────────────────────
   quote_issuer_agent:
     name: "quote_issuer_agent"
     agent_type: "programmatic"
-    description: "Artifact-producing executor — renders + issues the approved quote to ./out/<quote>.pdf (or .md) and pushes to your CPQ; a fail-closed floor blocks any unapproved / under-approved quote"
     communication_type: "chain"
-    # CPQ push is a custom Python actuator (urllib) inside the agent body, so
-    # the webhook is read from env (${CPQ_WEBHOOK_URL:} / ${CPQ_WEBHOOK_TOKEN:}),
-    # NOT a YAML connector_config block (which the SDK reserves for
-    # integration-typed agents). Inert until CPQ_WEBHOOK_URL is set; the issuer
-    # always renders ./out/<quote>.pdf and records a dev-store fallback.
+    description: "Artifact-producing executor — renders + issues the approved quote to ./out/<quote>.pdf (or .md); a fail-closed floor blocks any unapproved / under-approved quote and deletes the partial."
+    # CPQ push is a custom urllib actuator inside the agent body reading
+    # ${CPQ_WEBHOOK_URL:} / ${CPQ_WEBHOOK_TOKEN:} from env — NOT a YAML
+    # connector_config block (which the SDK reserves for integration agents).
     yields:
       quote_id: "string"
       artifact_path: "string"          # ./out/<quote_id>.pdf or .md — the real artifact
-      artifact_kind: "string"          # "pdf" | "markdown" | "none"
+      artifact_kind: "string"          # pdf | markdown | none
       issued: "boolean"                # FORCED by the @chain fail-closed floor
-      status: "string"                 # "issued" | "issuance_blocked" | "no_deal_context"
+      status: "string"                 # issued | issuance_blocked | no_deal_context
       block_reasons: "list"            # why issuance was blocked (floor)
       approved: "boolean"
       approved_by: "string"            # which approver cleared the tier
@@ -501,160 +416,248 @@ agents:
       upstream_yields: "object"
     can_call:
       - agent: "qtc_audit_logger_agent"
+        condition: always
 
-  # ────────────────────────────────────────────────────────────
-  # competitor_watch_agent — competitor price changes from YOUR
-  # price-intelligence stack (Klue, Crayon, Kompyte, or your own
-  # scraping workflow), not template code. The n8n workflow should
-  # return: {"competitor_changes": [...]}.
-  # ────────────────────────────────────────────────────────────
-  competitor_watch_agent:
-    name: "competitor_watch_agent"
-    agent_type: "programmatic"
-    description: "Pulls competitor price changes from your price-intelligence stack (Klue / Crayon / scraper) via n8n"
-    communication_type: "execute"
-    integration: "n8n"
-    connector_config:
-      webhook_url: "${N8N_COMPETITOR_WATCH_WEBHOOK_URL:}"   # your price-sweep workflow URL
-      auth_token: "${N8N_AUTH_TOKEN:}"
-    # wake_up: "0 8 * * *"   # enable after wiring your price-intelligence connector — a cron sweeping an unwired connector just fills the logs with errors
+  # ─────────────────────────────────────────────────────────────────────────
+  # billing_agent — AR & Collections Clerk (AI). The CASH side. One role, two
+  # crafts loaded from the playbook on demand: `invoice` (raise an invoice from
+  # an accepted quote) and `dun` (chase an overdue invoice on cadence).
+  # `instances: 3` fans the sweep across parallel copies; each calls the atomic
+  # claim_billing_work tool and gets a DISJOINT slice, so copies split the
+  # backlog instead of all chasing the same invoices. @chain never duns a PAID
+  # invoice (fail closed) and records verified actions. Backed by
+  # agency/billing_agent.py.
+  # ─────────────────────────────────────────────────────────────────────────
+  billing_agent:
+    name: "billing_agent"
+    agent_type: "llm"
+    communication_type: "chain"
+    model: "gpt-4o-mini"
+    temperature: 0.1
+    max_tool_calls_per_message: 10   # claim + read across a backlog; default 5 truncates silently
+    description: "AR & Collections Clerk — invoices accepted quotes and duns the overdue backlog; instances fan-out with an atomic claim; a code floor never duns a paid invoice."
+    instances: 3                     # parallel copies per activation (backlog fan-out)
+    instances_handoff: last          # COMBINE the copies' results and route once
+    # Scheduled dunning sweep — daily, in the company's timezone (NOT UTC).
+    # Also reachable via the dunning_sweep entry point. ONE cron line — with
+    # instances: 3 that is 3 copies per sweep (not 9); a list would multiply.
+    wake_up: "0 9 * * *"
+    timezone: "Asia/Kolkata"
+    wake_up_input:
+      trigger: dunning_sweep
+      mode: dun
+    prompt: |
+      You are the AR & Collections Clerk. You run in ONE of two modes per
+      activation — set "mode" to the one you worked in:
+        · invoice — a customer accepted a quote; raise the invoice.
+        · dun     — a scheduled sweep of the overdue backlog; chase them.
+
+      FIRST claim your work atomically with claim_billing_work(kind, count) so
+      you and your parallel copies never touch the same invoice — put every
+      invoice_id you claimed into "worked". Read details with
+      read_open_invoices. Load the `invoice` or `dun` playbook for the cadence.
+
+      NOTE: a deterministic code floor re-checks every claimed invoice against
+      the billing system and will NEVER dun one that is already paid; it
+      records each verified action and raises an escalation for anything
+      severely overdue. Report honestly what you claimed — do not invent an
+      invoice the claim did not return.
+
+      OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
+      {"mode": "", "worked": [], "escalations": [], "dunned_count": 0, "invoiced_count": 0, "available": false, "summary": "", "claim_token": ""}
     yields:
-      competitor_changes: "list"
+      mode: "string"                 # invoice | dun
+      worked: "list"                 # invoice_ids this worker verified + acted on
+      escalations: "list"            # invoice_ids needing the RevOps Lead (list -> concatenates on merge)
+      dunned_count: "number"
+      invoiced_count: "number"
+      available: "boolean"           # honest dev-store availability
+      summary: "string"
+      claim_token: "string"
     inputs:
       trigger: "string"
-    can_call: []
+      mode: "string"
+    playbook:
+      - intent: invoice
+        description: "How to raise an invoice from an accepted quote."
+        responsibility: |
+          1. Claim the accepted-quote work (claim_billing_work kind=invoice) —
+             exactly one copy wins a single accepted quote; the rest get none.
+          2. Build the invoice from the accepted quote's terms (net 30 from
+             issue). Record it; do not mark anything paid.
+          3. If nothing was claimed, say so honestly (available:false) — never
+             report an invoice you did not raise.
+      - intent: dun
+        description: "How to chase an overdue invoice on cadence."
+        responsibility: |
+          1. Claim a DISJOINT batch of overdue invoices (claim_billing_work
+             kind=dun, count) so copies split the backlog.
+          2. For each, advance the dunning stage by one and send the
+             stage-appropriate reminder. Never chase a paid invoice — the code
+             floor enforces this, but do not attempt it.
+          3. Anything severely overdue (45+ days) or past the final dunning
+             stage goes to the RevOps Lead — put it in "escalations".
+    tools: [read_open_invoices, claim_billing_work]
+    tool_categories: [billing]
+    # ── To wire a real billing/AR system, uncomment and set the URL (the SDK
+    #    rejects an empty-url http mcp at load, so this ships COMMENTED). ──
+    # mcp:
+    #   - transport: http
+    #     url: "${BILLING_MCP_URL}"
+    #     token: "${BILLING_MCP_TOKEN:}"
+    #     use: [read_open_invoices, raise_invoice, record_payment]
+    #     name: billing
+    #     timeout: 30
+    can_call:
+      - agent: "revops_lead_human"
+        condition: "calling_agent_response.escalations != []"
+      - agent: "qtc_audit_logger_agent"
+        condition: "calling_agent_response.worked != []"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Human members — first-class, reached in the channel they already live in.
+  # Every gate DEFAULT-DENIES on timeout (fallback -> held_for_review -> audit).
+  # `dual` belongs on the human/webhook boundary agent only; downstream peers
+  # are `chain` (a dual->dual can_call is unbounded ping-pong, nuance #17).
+  # ─────────────────────────────────────────────────────────────────────────
 
   sales_rep_human:
     name: "sales_rep_human"
     agent_type: "human"
-    is_human_powered: true
-    description: "Sales rep — own approval up to small thresholds"
-    human_interface: "default"
+    human_interface: "webhook"
     communication_type: "dual"
-    human_timeout_seconds: 3600
-    # operator_ids: ["you@yourcompany.com"]   # optional — unset routes this
-    #   gate to the SHARED inbox. Only set real operator emails: a
-    #   placeholder assigns tasks to a nonexistent operator and they
-    #   never appear in anyone's inbox.
+    human_timeout_seconds: 3600      # 1 hour to approve / rework a small deal
+    description: "Sales Rep — self-approves small healthy deals; reworks incomplete RFQs."
     fallback_on_timeout: true
     fallback_response:
-      decision: "escalate_to_deal_desk"
-      message: "escalate_to_deal_desk"
-      note: "Rep didn't respond — deal desk escalation"
+      human_decision: held
+      human_message: held_for_review
+    webhook_config:
+      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
+      outbound_headers: {Content-Type: "application/json"}
+      outbound_timeout: 30
+      max_retries: 1
+      retry_delay: 2
     yields:
-      decision: "string"
-      notes: "string"
+      human_message: "string"        # approve | reject | resubmit | held_for_review
     inputs:
       rfq_id: "string"
     can_call:
-      - agent: "deal_desk_human"
-        condition: "calling_agent_response.human_message == 'escalate_to_deal_desk'"
-
-      - agent: "quote_drafter_agent"
+      - agent: "drafter_agent"
         condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'Approved'"
-
+      - agent: "cass_shaper_agent"
+        condition: "calling_agent_response.human_message == 'resubmit'"
       - agent: "qtc_audit_logger_agent"
-        condition: "calling_agent_response.human_message == 'reject'"
+        condition: "calling_agent_response.human_message == 'reject' or calling_agent_response.human_message == 'held_for_review'"
 
   deal_desk_human:
     name: "deal_desk_human"
     agent_type: "human"
-    is_human_powered: true
-    description: "Deal desk — discount + competitive deals"
-    human_interface: "default"
+    human_interface: "webhook"
     communication_type: "dual"
-    human_timeout_seconds: 14400
-    # operator_ids: ["you@yourcompany.com"]   # optional — unset routes this
-    #   gate to the SHARED inbox. Only set real operator emails: a
-    #   placeholder assigns tasks to a nonexistent operator and they
-    #   never appear in anyone's inbox.
+    human_timeout_seconds: 14400     # 4 hours
+    description: "Deal Desk — discounted + competitive deals."
     fallback_on_timeout: true
     fallback_response:
-      decision: "escalate_to_finance"
-      message: "escalate_to_finance"
-      note: "Deal desk didn't respond — finance escalation"
+      human_decision: held
+      human_message: held_for_review
+    webhook_config:
+      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
+      outbound_headers: {Content-Type: "application/json"}
+      outbound_timeout: 30
     yields:
-      decision: "string"
-      notes: "string"
+      human_message: "string"        # approve | reject | held_for_review
     inputs:
       rfq_id: "string"
     can_call:
-      - agent: "finance_approver_human"
-        condition: "calling_agent_response.human_message == 'escalate_to_finance'"
-
-      - agent: "quote_drafter_agent"
+      - agent: "drafter_agent"
         condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'Approved'"
-
       - agent: "qtc_audit_logger_agent"
-        condition: "calling_agent_response.human_message == 'reject'"
+        condition: "calling_agent_response.human_message == 'reject' or calling_agent_response.human_message == 'held_for_review'"
 
   finance_approver_human:
     name: "finance_approver_human"
     agent_type: "human"
-    is_human_powered: true
-    description: "Finance approver — margin + large deals"
-    human_interface: "default"
+    human_interface: "webhook"
     communication_type: "dual"
-    human_timeout_seconds: 21600
-    # operator_ids: ["you@yourcompany.com"]   # optional — unset routes this
-    #   gate to the SHARED inbox. Only set real operator emails: a
-    #   placeholder assigns tasks to a nonexistent operator and they
-    #   never appear in anyone's inbox.
+    human_timeout_seconds: 21600     # 6 hours
+    description: "Finance Approver — margin + large deals."
     fallback_on_timeout: true
     fallback_response:
-      decision: "escalate_to_cfo"
-      message: "escalate_to_cfo"
-      note: "Finance didn't respond — CFO escalation"
+      human_decision: held
+      human_message: held_for_review
+    webhook_config:
+      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
+      outbound_headers: {Content-Type: "application/json"}
+      outbound_timeout: 30
     yields:
-      decision: "string"
-      notes: "string"
+      human_message: "string"        # approve | reject | held_for_review
     inputs:
       rfq_id: "string"
     can_call:
-      - agent: "cfo_human"
-        condition: "calling_agent_response.human_message == 'escalate_to_cfo'"
-
-      - agent: "quote_drafter_agent"
+      - agent: "drafter_agent"
         condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'Approved'"
-
       - agent: "qtc_audit_logger_agent"
-        condition: "calling_agent_response.human_message == 'reject'"
+        condition: "calling_agent_response.human_message == 'reject' or calling_agent_response.human_message == 'held_for_review'"
 
   cfo_human:
     name: "cfo_human"
     agent_type: "human"
-    is_human_powered: true
-    description: "CFO — top-tier authority"
-    human_interface: "default"
+    human_interface: "webhook"
     communication_type: "dual"
-    human_timeout_seconds: 43200
-    # operator_ids: ["you@yourcompany.com"]   # optional — unset routes this
-    #   gate to the SHARED inbox. Only set real operator emails: a
-    #   placeholder assigns tasks to a nonexistent operator and they
-    #   never appear in anyone's inbox.
+    human_timeout_seconds: 43200     # 12 hours
+    description: "CFO — top-tier authority (below-floor margin, deep discount, > $1M)."
     fallback_on_timeout: true
     fallback_response:
-      decision: "halt_for_review"
-      message: "halt_for_review"
-      note: "CFO unavailable — held"
+      human_decision: held
+      human_message: held_for_review
+    webhook_config:
+      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
+      outbound_headers: {Content-Type: "application/json"}
+      outbound_timeout: 30
     yields:
-      decision: "string"
-      directive: "string"
+      human_message: "string"        # approve | reject | held_for_review
     inputs:
       rfq_id: "string"
     can_call:
-      - agent: "quote_drafter_agent"
+      - agent: "drafter_agent"
         condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'Approved'"
-
       - agent: "qtc_audit_logger_agent"
-        condition: "calling_agent_response.human_message != 'approve' and calling_agent_response.human_message != 'Approve' and calling_agent_response.human_message != 'Approved'"
+        condition: "calling_agent_response.human_message == 'reject' or calling_agent_response.human_message == 'held_for_review'"
 
+  revops_lead_human:
+    name: "revops_lead_human"
+    agent_type: "human"
+    human_interface: "webhook"
+    communication_type: "dual"
+    human_timeout_seconds: 43200     # 12 hours
+    description: "Accountable owner — resolves escalations, owns policy calls; the Manager escalates here. Everything that leaves the pod."
+    fallback_on_timeout: true
+    fallback_response:
+      human_decision: held
+      human_message: held_for_review
+    webhook_config:
+      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
+      outbound_headers: {Content-Type: "application/json"}
+      outbound_timeout: 30
+    yields:
+      human_message: "string"        # resolved | held_for_review
+    inputs:
+      exception: "object"
+    can_call:
+      - agent: "qtc_audit_logger_agent"
+        condition: always
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # WORM audit sink — hash-chained, append-only, the terminus of every path.
+  # Registered in main.py via sdk.intelligence("qtc_audit_logger_agent").
+  # ─────────────────────────────────────────────────────────────────────────
   qtc_audit_logger_agent:
     name: "qtc_audit_logger_agent"
     agent_type: "external"
-    description: "Hash-chained WORM"
     framework: "custom"
     communication_type: "execute"
+    description: "WORM audit — hash-chains every decision, approval, issuance, held gate, and dunning action. Terminus."
     connector_config:
       sink_type: "local_file"
       local_file_path: "./logs/qtc_audit.jsonl"
@@ -667,320 +670,3 @@ agents:
       session_id: "string"
       payload: "object"
     can_call: []
-
-  # ────────────────────────────────────────────────────────────
-  # bundle_recommender_agent — cross-sell on RFQ context
-  # Real Q2C pain: customer asks for SKU-A; they'd benefit from also
-  # buying SKU-B (frequently bought together; complementary use case).
-  # Sales reps don't have time to mine customer history per quote.
-  # ────────────────────────────────────────────────────────────
-  bundle_recommender_agent:
-    name: "bundle_recommender_agent"
-    agent_type: "llm"
-    description: "Suggests adjacent SKUs based on customer history + similar accounts (cross-sell)"
-    model: "gpt-4o-mini"
-    temperature: 0.1
-    max_tokens: 1200
-    communication_type: "chain"
-
-    prompt: |
-      A customer requested quote on these SKUs. Suggest adjacent
-      SKUs they should consider. Sources:
-        - their purchase history (what they've bought from us)
-        - similar accounts (what other accounts in their segment buy)
-        - product affinity (frequently-bought-together)
-        - use-case completeness (do the requested SKUs need a
-          complementary item to actually solve their use case?)
-
-      Return JSON with these keys:
-        - "bundle_candidates": list of {sku, rationale,
-          expected_attach_rate, incremental_revenue_cents} — at most 5
-          candidates, ordered by expected_attach_rate descending (don't
-          overwhelm the rep)
-        - "bundle_message_to_customer": short customer-facing pitch
-          for the bundle (3 sentences max)
-        - "confidence": must be between 0 and 1
-        - "dont_recommend_reason": empty if recommending; populated if
-          we explicitly should NOT recommend (e.g., customer already
-          declined this SKU last quote)
-
-      Hard rule: when "dont_recommend_reason" is non-empty,
-      "bundle_candidates" MUST be [] — never recommend and suppress
-      at the same time.
-
-      Never push something they've explicitly rejected. Never bundle
-      compliance-bound items they're not authorized for.
-
-      OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
-      {"bundle_candidates": [], "bundle_message_to_customer": "", "confidence": 0, "dont_recommend_reason": ""}
-
-    enforce_yields: true
-    enforce_yields_retry: 1
-
-    knowledge:
-      serviceName: "mongo_main"
-      enabled: true
-      groupName: "product_affinity"
-
-    yields:
-      bundle_candidates: "list"
-      bundle_message_to_customer: "string"
-      confidence: "number"
-      dont_recommend_reason: "string"
-
-    inputs:
-      rfq_context: "object"
-
-    can_call:
-      - agent: "sales_rep_human"
-        condition: "calling_agent_response.bundle_candidates != []"
-
-      - agent: "qtc_audit_logger_agent"
-        condition: "calling_agent_response.bundle_candidates == []"
-
-  # ────────────────────────────────────────────────────────────
-  # contract_redline_tracker_agent — redline ledger in YOUR CLM.
-  # The system of record for who changed what across contract
-  # versions is your CLM (Ironclad, DocuSign CLM, Conga, LinkSquares)
-  # — not a template database. Point the MCP server at your CLM; the
-  # tool takes {mode: open|update|report, contract_id, redline_id,
-  # section, proposed_change, current_owner, status} and must return
-  # the yields declared below (the deal desk reads redline_briefing
-  # as its morning standup; requires_deal_desk_action=true means
-  # redlines are stalled past the lead-time threshold).
-  # ────────────────────────────────────────────────────────────
-  contract_redline_tracker_agent:
-    name: "contract_redline_tracker_agent"
-    agent_type: "programmatic"
-    description: "Contract redline ledger in your CLM (Ironclad / DocuSign CLM / Conga) via MCP — open, update, report stalled redlines"
-    communication_type: "chain"
-    integration: "mcp"
-    connector_config:
-      tool_name: "redline_ledger"           # the redline tool on your CLM MCP server
-      transport: "http"
-      url: "${CLM_MCP_URL:}"                # e.g. https://mcp.yourcompany.com/clm
-      auth_token: "${CLM_MCP_TOKEN:}"
-    yields:
-      mode: "string"
-      redline_id: "string"
-      contract_id: "string"
-      total_redlines: "number"
-      by_status: "object"
-      by_owner_open: "object"
-      stalled_count: "number"
-      stalled_redlines: "list"
-      requires_deal_desk_action: "boolean"
-      redline_briefing: "string"
-    inputs:
-      mode: "string"
-      contract_id: "string"
-      redline_id: "string"
-      section: "string"
-      proposed_change: "string"
-      current_owner: "string"
-      status: "string"
-    can_call:
-      - agent: "deal_desk_human"
-        condition: "calling_agent_response.requires_deal_desk_action == true"
-
-    auto_store_response: true
-    auto_store_yields: true
-
-  # ────────────────────────────────────────────────────────────
-  # deal_compliance_agent — one deal-compliance analyst, two
-  # responsibilities (ROLE merge of the former contract-review and
-  # rev-rec-classifier agents):
-  #   · mode contract_review — clause-by-clause playbook check
-  #       (acceptable / negotiable / unacceptable; unacceptable is
-  #       a HARD GATE → finance approver (the senior contract
-  #       authority below the CFO) for legal sign-off before the
-  #       quote advances). Distinct from contract_redline_tracker
-  #       (which tracks who changed what across versions).
-  #   · mode rev_rec — ASC 606 classification (POs, SSP allocation,
-  #       recognition pattern; ambiguity OR multi-year + variable
-  #       consideration → CFO review).
-  # Dispatch: explicit `mode` input wins; else inferred from the
-  # caller's ask. Backed by agency/deal_compliance_agent.py:
-  #   @chain enforce_compliance_floor — RECOMPUTES risk_score from the
-  #   severity counts and FORCES requires_legal_review true whenever the
-  #   review contains ANY unacceptable clause (the model cannot soften an
-  #   unacceptable clause into "fine to proceed"); rev_rec mode forces
-  #   requires_cfo_review on the restatement-risk conditions. The legal
-  #   hard gate to the finance approver routes on the COMPUTED flag.
-  # ────────────────────────────────────────────────────────────
-  deal_compliance_agent:
-    name: "deal_compliance_agent"
-    agent_type: "llm"
-    description: "Deal-compliance analyst — playbook clause review (mode contract_review) + ASC 606 rev-rec classification (mode rev_rec); unacceptable clauses hard-gate to the finance approver for legal sign-off, rev-rec ambiguity routes to CFO"
-    model: "claude-sonnet-4-6"
-    temperature: 0.0
-    max_completion_tokens: 2500
-    communication_type: "chain"
-
-    prompt: |
-      You are the deal-compliance analyst for this quote-to-cash
-      desk. One role, two responsibilities — work in exactly ONE
-      mode per request, and set "mode" to the one you worked in.
-
-      Mode selection: an explicit `mode` field in the input wins
-      (contract_review / clause_review / playbook → contract_review;
-      rev_rec / rev_rec_classify / revenue_recognition / asc_606 →
-      rev_rec). Otherwise: clause / playbook / contract-terms
-      language → MODE contract_review; ASC 606 / revenue-recognition
-      language → MODE rev_rec. When still ambiguous, default to
-      contract_review.
-
-      EVERY response must contain EVERY key in the OUTPUT CONTRACT.
-      Fill the inactive mode's keys with their type defaults
-      ("" for strings, 0 for numbers, [] for lists, {} for objects,
-      false for booleans) — never omit a key.
-
-      ── MODE contract_review — playbook clause check ──
-      Extract the contract clauses from the quote draft (use the
-      exact phrase from the draft; don't paraphrase). Clause types:
-      auto_renewal, price_escalator, payment_terms, service_level,
-      liability_cap, data_residency, ip_ownership. A clause of any
-      other type is "unmapped".
-
-      Classify each extracted clause against the FIRM PLAYBOOK
-      (match on the clause wording; check unacceptable patterns
-      first, then negotiable, then acceptable; a clause matching no
-      pattern is "unmapped"):
-        - auto_renewal — acceptable: auto-renew with 30 days notice
-          to cancel; negotiable: auto-renew with 60 days notice;
-          unacceptable: auto-renew with no notice, indefinite
-          automatic renewal
-        - price_escalator — acceptable: annual increase capped at
-          CPI, 3% or 5% annual increase; negotiable: 7% or 10%
-          annual increase; unacceptable: uncapped or discretionary
-          increase
-        - payment_terms — acceptable: net 30; negotiable: net 60;
-          unacceptable: net 90, upon completion, milestone-based
-          without schedule
-        - service_level — acceptable: 99.9% or 99.95% uptime;
-          negotiable: 99.99% uptime; unacceptable: 100% uptime,
-          zero downtime
-        - liability_cap — acceptable: annual fees / 12 months fees;
-          negotiable: 24 months fees / 2x annual fees; unacceptable:
-          unlimited, uncapped, no limit
-        - data_residency — acceptable: US only, EU only,
-          customer-selected region; negotiable: specific regions
-          list; unacceptable: any region, no residency commitment
-        - ip_ownership — acceptable: customer owns customer data,
-          vendor owns platform IP; negotiable: shared IP on
-          customisations; unacceptable: customer owns platform IP,
-          perpetual source-code escrow
-
-      Then produce:
-        - "clauses_reviewed": count of clauses you reviewed
-        - "review": list of {clause_type, clause_text (max 500
-          chars), severity (acceptable | negotiable | unacceptable |
-          unmapped), matched_pattern}
-        - "severity_counts": object counting clauses per severity
-        - "unacceptable_clauses" / "negotiable_clauses" /
-          "unmapped_clauses": lists of clause_type strings
-        - "counter_proposals": one {clause_type, current,
-          counter_propose} per negotiable clause — counter_propose
-          is the playbook's first acceptable wording for that type
-        - "risk_score": min(1.0, 0.5 × unacceptable count + 0.15 ×
-          negotiable count + 0.05 × unmapped count), rounded to 2
-          decimals
-        - "requires_legal_review": true if ANY clause is
-          unacceptable (HARD GATE — never soften this; a code floor
-          also FORCES this true from your classified clause list, so
-          a mislabelled clean verdict is overridden anyway)
-        - "requires_deal_desk_review": true if there is at least 1
-          negotiable clause OR at least 3 unmapped clauses
-
-      ── MODE rev_rec — ASC 606 classification ──
-      Classify this deal per ASC 606:
-        - "quote_id": echo quote_id from the input unchanged
-        - "performance_obligations": list of objects (name, type,
-          allocated_cents, ssp_cents, recognition_pattern_per_po)
-        - "recognition_pattern": point_in_time | over_time | mixed
-        - "variable_consideration": list of objects (kind, max_cents,
-          constraint)
-        - "is_multi_element": boolean
-        - "contract_term_months": integer
-        - "total_allocated_cents": the sum of allocated_cents across
-          all performance obligations
-        - "classification_confidence": your confidence — must be
-          between 0 and 1
-        - "requires_cfo_review": true when classification_confidence
-          is below 0.7, OR contract_term_months >= 24 AND
-          variable_consideration is non-empty, OR is_multi_element
-          with more than 3 performance obligations (misclassification
-          = restatement risk — when in doubt, set true)
-        - "rev_rec_briefing": 2-3 sentence narrative for the
-          controller; end with "CFO review required." or "Standard
-          treatment."
-
-      OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
-      {"mode": "", "clauses_reviewed": 0, "review": [], "severity_counts": {}, "unacceptable_clauses": [], "negotiable_clauses": [], "unmapped_clauses": [], "counter_proposals": [], "risk_score": 0, "requires_legal_review": false, "requires_deal_desk_review": false, "quote_id": "", "performance_obligations": [], "recognition_pattern": "", "variable_consideration": [], "is_multi_element": false, "contract_term_months": 0, "total_allocated_cents": 0, "classification_confidence": 0, "requires_cfo_review": false, "rev_rec_briefing": "", "compliance_floor_applied": false}
-
-    enforce_yields: true
-    enforce_yields_retry: 2
-
-    knowledge:
-      serviceName: "mongo_main"
-      enabled: true
-      groupName: "rev_rec_policy"
-
-    yields:
-      mode: "string"
-      # contract-review responsibility
-      clauses_reviewed: "number"
-      review: "list"
-      severity_counts: "object"
-      unacceptable_clauses: "list"
-      negotiable_clauses: "list"
-      unmapped_clauses: "list"
-      counter_proposals: "list"
-      risk_score: "number"
-      requires_legal_review: "boolean"
-      requires_deal_desk_review: "boolean"
-      # rev-rec responsibility
-      quote_id: "string"
-      performance_obligations: "list"
-      recognition_pattern: "string"
-      variable_consideration: "list"
-      is_multi_element: "boolean"
-      contract_term_months: "number"
-      total_allocated_cents: "number"
-      classification_confidence: "number"
-      requires_cfo_review: "boolean"
-      rev_rec_briefing: "string"
-      compliance_floor_applied: "boolean"   # set by the @chain floor
-
-    inputs:
-      upstream_yields: "object"
-      quote_id: "string"
-      mode: "string"
-
-    can_call:
-      # Hard gate (contract_review mode) — unacceptable clause →
-      # finance approver for legal sign-off (the senior contract
-      # authority below the CFO; no standalone legal role in this cast)
-      - agent: "finance_approver_human"
-        condition: "calling_agent_response.requires_legal_review == true"
-
-      # Negotiable → deal_desk before CFO (contract_review mode)
-      - agent: "deal_desk_human"
-        condition: "calling_agent_response.requires_deal_desk_review == true and calling_agent_response.requires_legal_review == false"
-
-      # Clean contract review → finance approver for sign-off.
-      # Contract review runs pre-CFO sign-off, and deal financials
-      # (amount / margin / discount) are NOT in this agent's yields,
-      # so a clean playbook pass routes to the tier directly below
-      # the CFO rather than re-entering the pricing matrix (which
-      # lives on discount_policy_agent's wires). Mode-scoped so a
-      # clean rev-rec classification stays terminal.
-      - agent: "finance_approver_human"
-        condition: "calling_agent_response.mode == 'contract_review' and calling_agent_response.requires_legal_review == false and calling_agent_response.requires_deal_desk_review == false"
-
-      # Rev-rec mode — ambiguity / multi-year + variable consideration → CFO
-      - agent: "cfo_human"
-        condition: "calling_agent_response.requires_cfo_review == true"
-
-    auto_store_response: true
-    auto_store_yields: true

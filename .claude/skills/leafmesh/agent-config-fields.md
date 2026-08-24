@@ -50,11 +50,18 @@ These fields apply to every agent regardless of `agent_type`.
 | `description` | string | `null` | any string | no | Agent description and purpose |
 | `agent_type` | string | `"llm"` | `llm`, `human`, `programmatic`, `external` | no | Agent execution type (see note below) |
 | `communication_type` | string | `"dual"` | `dual`, `chain`, `execute` | no | How agent communicates with the mesh |
-| `parallel` | bool | `false` | `true`, `false` | no | Enable parallel processing |
-| `max_concurrent` | int | `null` | 1 – unlimited | no | Max concurrent calls when `parallel: true` (null = unlimited) |
-| `wake_up` | string | `null` | cron expression (e.g. `"0 9 * * *"`) | no | Schedule for periodic wake-up |
+| `parallel` | bool | `false` | `true`, `false` | no | **Managed concurrency, not acceleration.** With `true`, up to `max_concurrent` sessions execute in this agent simultaneously; overflow calls are QUEUED and drain as slots free (queue actually drains since 2.4.38). WITHOUT it, every arriving call starts immediately — no per-agent cap at this gate. Use it to protect rate limits and cap simultaneous LLM spend on high-traffic agents |
+| `max_concurrent` | int | `5` (when `parallel: true`) | 1+ | no | The teller windows: simultaneous executions before new calls queue. Omitting it does NOT mean unlimited — the default is 5 |
+| `instances` | int | `1` | 1–50 | no | **Parallel copies per activation (2.4.118+).** ONE trigger — wake, API request, chain handoff, mesh call, event listener — fans out into N executions of this agent in the SAME session. Each copy's input carries `_instance: {id, of}`; pair with an atomic claim tool so copies split a backlog instead of duplicating work. Distinct from `parallel`: that caps INCOMING calls, `instances` multiplies this agent's own run |
+| `instances_handoff` | string | `"last"` | `last`, `each` | no | What routes downstream when the copies finish. `last` (default): results are COMBINED — lists concatenated in instance order, numbers summed, other fields from the final copy, no field dropped — and the chain continues ONCE; the full per-copy detail also rides on `result._instances` for `@chain`/`@compose` rewrites, and `upstream_yields` carries the same combined payload. `each`: every copy routes its own raw result downstream (N triggers, no combining) |
+| `monthly_token_budget` | int | `null` | > 0 | no | Opt-in monthly token cap for this agent (auto-resets each calendar month). The gate pre-estimates each call and refuses BEFORE spending — the cap is never exceeded. Only bites LLM spend |
+| `monthly_cost_budget` | float | `null` | > 0 (USD) | no | Same as above in dollars; either cap trips the gate |
+| `budget_on_exhaust` | string | `graceful` | `graceful`, `escalate` | no | What exhaustion does: `graceful` = the agent stops cleanly with a `budget_exhausted` marker (yields filled with defaults, chain continues, no alarm); `escalate` = routed to the Manager as an error |
+| `wake_up` | string or list | `null` | cron string; OR (2.4.107+) a list of cron strings; OR a list of `{cron, input, timezone}` entries | no | Scheduled wake-up(s). Multiple schedules per agent are supported; each entry may carry its own `input` dict merged into that wake's payload, and (2.4.124+) its own `timezone` overriding the agent-level one for that schedule |
+| `wake_up_input` | dict | `null` | any JSON object | no | 2.4.107+ — declared input template for scheduled wake-ups. Merged as the BASE of every wake payload (per-schedule `input` overrides it; trigger markers `wake_up_trigger`/`trigger_time` always win). Cron-woken agents receive real input instead of a bare trigger |
+| `timezone` | string | `null` (= UTC) | any IANA zone, e.g. `"Asia/Kolkata"` | no | 2.4.124+ — timezone governing this agent's `wake_up` cron schedules. **Without it, crons run in UTC** — `"0 9 * * *"` fires at 14:30 IST, not 9:00. Validated at config load (a fake zone like `Asia/Bangalore` fails boot with a clear error). Studio offers a picker fed by `GET /api/registry?category=timezones` (2.4.125+) |
 | `listen_events` | list | `[]` | list of `EventListener` entries (see [Event Listeners](#event-listeners--brd-021)) | no | Bind agent to external event sources (Kafka, SQS, MQTT, Redis Streams, IMAP). Each entry references a broker from the top-level `brokers:` block. Parallel to `wake_up` — both are agent-level trigger surfaces |
-| `yields` | dict | `{}` | key: field name, value: type string or nested object | no | Output schema — what agent produces |
+| `yields` | dict | `{}` | key: field name, value: type string or nested object | no | Output schema — what the agent produces. Nested objects: `{type: object, fields: {...}}`; arrays: `{type: array, items: ...}`. Any declaration may add `nullable: true` (2.4.104) to accept an explicit null — declare it instead of leaving legitimately-null fields undeclared |
 | `inputs` | dict | `{}` | key: field name, value: type string or nested object | no | Input schema — what agent expects |
 | `can_call` | list | `[]` | list of `{"agent": "name"}` or `{"agent": "name", "condition": "expr"}` | no | Agents this agent can invoke |
 | `narration` | string | `null` | any string (multiline supported) | no | Plain-English routing hints for the Manager — evaluated by the Summarizer when conditions don't cover everything (see [Narration Routing](#narration-routing)) |
@@ -63,7 +70,7 @@ These fields apply to every agent regardless of `agent_type`.
 | `auto_store_response` | bool | `true` | `true`, `false` | no | Auto-store responses in Redis |
 | `auto_store_yields` | bool | `true` | `true`, `false` | no | Auto-store yields in Redis |
 | `memory` | bool or dict | `false` | `true`, `false`, or memory config dict | no | Agent memory — see [Memory Config](#memory-config) |
-| `memory_limit` | int | `10` | 1 – 100 | no | Legacy: max recent feed posts (use `memory.limit` instead) |
+| `memory_limit` | int | `10` | 1 – 100 | no | Max recent feed posts to load when `memory: true`. **Still a real declared field** (`int`, default `10`) in 2.4.33 — `memory: true` + `memory_limit: N` is valid and verified. Alternatively pass `memory` as a config dict (see [Memory Config](#memory-config)). |
 | `knowledge` | bool or dict | `false` | `false`, or `{serviceName, enabled, groupName}` | no | Knowledge/RAG — see [Knowledge Config](#knowledge-config) |
 | `enforce_yields` | bool | `false` | `true`, `false` | no | Strictly validate this agent's output against the declared `yields:` schema. `false` (default) fills missing keys with type defaults and logs warnings; `true` triggers a Manager-driven retry up to `enforce_yields_retry` times, then escalates. See [Yields Enforcement](#yields-enforcement). |
 | `enforce_yields_retry` | int | `0` | 0 – unlimited | no | Maximum self-correction attempts when `enforce_yields: true`. `0` fails on first contract violation. Each retry passes the previous output + validation errors as feedback so LLM/external/human/programmatic agents can self-correct. Honored by every agent type. |
@@ -112,7 +119,7 @@ agents:
 
 ### Changing `agent_type`
 
-You can change an agent's type via `PATCH /api/yaml/agents/{name}`. When `agent_type` changes, the ADK automatically **removes fields that don't belong to the new type**:
+You can change an agent's type via `PATCH /api/yaml/agents/{name}`. When `agent_type` changes, the SDK automatically **removes fields that don't belong to the new type**:
 
 | Switching away from... | Fields removed |
 |------------------------|----------------|
@@ -294,26 +301,47 @@ These fields are used when `agent_type` is `"llm"`. Ignored for other types.
 | `max_completion_tokens` | int | `null` | 1 – model max | Max completion tokens (o1, gpt-5.x models) |
 | `thinking` | bool | `false` | `true`, `false` | Enable SDK chain-of-thought scaffolding tools (works with any model). **Was `reasoning` pre-v2.2.24** |
 | `reasoning` | bool | `false` | `true`, `false` | Enable provider-native extended thinking/reasoning (requires a reasoning-capable model — see below). **Was `thinking` pre-v2.2.24** |
-| `reasoning_budget` | int | `null` | 1024 – 32768 (tokens) | Max native reasoning tokens. Provider defaults apply when omitted. `thinking_budget` is a deprecated alias (silently migrated) |
+| `reasoning_budget` | int | `null` | 1024 – 32768 (tokens) | Max native reasoning tokens. Provider defaults apply when omitted. |
+| `thinking_budget` | int | `null` | 1024 – 32768 (tokens) | Legacy budget field, still **its own declared `AgentConfig` field** in 2.4.33 (not removed). Prefer `reasoning_budget`; set only one to avoid ambiguity. |
 | `enable_prompt_caching` | bool | `false` | `true`, `false` | Enable provider-native prompt caching for cost reduction (see below) |
-| `response_format` | dict | `null` | JSON Schema object | Structured output — forces LLM to respond with valid JSON matching this schema |
+| `cache` | bool | `null` | `true`, `false` | LLM-text cache opt-out (2.4.107). The SDK cache reuses ONLY the model's text on identical requests — your function/@chain/@compose always run fresh (side effects re-execute). `false` disables even that reuse for agents that need a fresh model call every time |
+| `strict_tools` | bool | `false` | `true`, `false` | Provider-native strict tool schemas (`strict: true`): the model cannot pass hallucinated or extra arguments to tools. Turn on when tool-arg discipline matters more than model flexibility |
+| `memory_strategy` | string | `null` | `recency`, `relevant`, `hybrid` | How prior activity is selected for recall when `memory` is enabled: newest-first, similarity-ranked, or blended |
+| `knowledge_strategy` | string | `null` | (provider-dependent) | Selection strategy for knowledge/RAG retrieval when `knowledge` is enabled |
+| `response_format` | dict | *(accepted extra — not a declared field)* | JSON Schema object | Structured output — forces LLM to respond with valid JSON matching this schema. **Not a declared `AgentConfig` field**; it is accepted via `extra='allow'` and consumed by the provider layer (works, but has no schema-level default/validation). |
 | `optimization_strategy` | string | `null` | `performance`, `cost`, `speed` | Per-agent model selection strategy |
 | `context_parts` | dict | `null` | see below | Optional context parts |
 | `tools` | list | `[]` | tool name strings | Available tools |
-| `tool_choice` | string | framework-managed | `auto`, `required`, `none`, or specific tool name | Tool selection strategy. **Leave unset** for framework default — the framework promotes to `required` on the first iteration when runtime tools (SDK CoT scaffolding, `recall_memory`, `query_knowledge`) are configured, so they actually fire; gpt-class models otherwise skip them on simple inputs. |
+| `tool_choice` | string | `"auto"` | `auto`, `required`, `none`, or specific tool name | Tool selection strategy. Default is the concrete string `"auto"` (it is never "unset"). The framework auto-promotes `auto`→`required` on the first iteration when runtime tools (SDK CoT scaffolding, `recall_memory`, `query_knowledge`) are configured, so they actually fire; gpt-class models otherwise skip them on simple inputs. Leave at `"auto"` unless you need to force `required`/`none`. |
 | `max_tool_calls_per_message` | int | `5` | 0 – 20 | Max tool calls per LLM message |
 | `tool_call_timeout` | float | `30.0` | 0.1 – 300 (seconds) | Tool execution timeout |
 | `allow_parallel_tool_calls` | bool | `true` | `true`, `false` | Allow parallel tool execution |
 | `tool_categories` | list | `[]` | category name strings | Tool categories agent can access |
 | `effort` | string | `null` | `"low"`, `"medium"`, `"high"` | v2.3.x — Claude 4.8 (Opus / Sonnet) `effort` parameter. Higher effort = deeper reasoning + more output tokens. Only applies to Anthropic Claude 4.8 family; ignored for other models. |
-| `super_agent` | bool | `false` | `true`, `false` | v2.3.x — Wrap this LLM agent in the multi-phase orchestrator (plan → execute → verify → reflect → finalize). See [Super-Agent v3 fields](#super-agent-v3-fields) below |
-| `super_agent_cost_ceiling` | int | provider-default | tokens | v2.3.x — Hard ceiling on aggregate LLM token cost (input + output) for one Super-Agent run. Breach → cancellation + `cost_ceiling.exceeded` event. Only used when `super_agent: true` |
-| `super_agent_step_cap` | int | `12` | 1 – 50 | v2.3.x — Maximum executable steps before the orchestrator hard-stops. Protects against runaway plans. Only used when `super_agent: true` |
-| `super_agent_reflection_budget` | int | `2` | 0 – 5 | v2.3.x — Maximum reflect-then-amend cycles per run. `0` disables reflection. Only used when `super_agent: true` |
-| `super_agent_wall_clock` | int | `900` | seconds | v2.3.x — Per-agent wall-clock seconds for a Super-Agent run. Default 15 minutes. Only used when `super_agent: true` |
-| `synth_max_tokens_floor` | int | `null` | tokens | v2.3.x — Lower bound on the synthesis call's `max_tokens`. Protects against Anthropic non-streaming guardrail (`max_tokens` < required → silent truncation). Recommended: `16384` for long-output Super-Agents on Claude |
-| `synth_max_tokens_ceiling` | int | `null` | tokens | v2.3.x — Upper bound (per-agent) on the synthesis call's `max_tokens`. Cost protection against runaway synthesis |
-| `skills` | dict | `null` | `{sourceName: str, enabled: bool, names: list}` | v2.3.x — Skills (reusable instruction playbooks) loaded on demand. **Must be a dict with `sourceName` AND `enabled: true`** — `skills: true` (bare bool) is treated as configured-but-unusable and the tool is stripped. See [Skills Config](#skills-config) below |
+| `super_agent` | bool \| dict | `false` | `true` / `false` / a tuning dict | Wrap this LLM agent in the multi-phase orchestrator (plan → execute → verify → reflect → finalize). `true` = on with defaults; a **dict** tunes it — the dict is the **only** tuning path (2.4.123+). See [Super-Agent v3 fields](#super-agent-v3-fields) below |
+| `skills` | list \| dict | `null` | `["name", …]` **or** `{sourceName, enabled, names}` | v2.3.x — Skills (reusable instruction playbooks) loaded on demand. `skills: true` (bare bool) is **rejected at YAML load** (`ValidationError`: must be a non-empty list of names, or a `{sourceName, enabled, names}` dict). See [Skills Config](#skills-config) below |
+| `receive_conversation_history` | bool | `false` | `true`, `false` | Inject prior turns of the session's conversation into this agent's context (see `history_limit`). |
+| `history_limit` | int | `20` | ≥ 0 | Max prior turns injected when `receive_conversation_history: true`. |
+| `stream_yield` | string | `null` | a yield key | Name of the yield to stream incrementally (token-by-token) to the caller/channel. |
+| `llm_hard_timeout_s` | float | `null` | seconds | Hard per-call wall-clock timeout for the LLM request; the call is aborted if exceeded. |
+| `response_overrides` | list \| dict | `null` | override rules | Post-hoc overrides applied to the LLM response (e.g. force/patch specific yields). Advanced; see the SDK reference. |
+| `skills_eager` | bool | env `LEAFMESH_SKILLS_EAGER` | `true`, `false` | (2.4.123) Ship every skill's **full body** in the prompt instead of lazily via `load_skill_reference`. Per-agent override of the fleet env default. For finer control use the per-skill `eager: [names]` sub-key of `skills:` (see [Skills Config](#skills-config)). |
+| `output_modality` | string | `"text"` | `"text"`, `"image"` | (declared field since 2.4.121) Output type for the agent. Pair `"image"` with an image-capable model and `image_options`. |
+| `image_options` | dict | `null` | provider image opts | (2.4.104, fixed 2.4.108) Options for image generation when `output_modality: "image"` (size, quality, etc.). **≥2.4.108 required** — earlier versions ran image models as TEXT turns on the mesh path (full token bill, empty content, yields failure). |
+
+> **⚠️ Tune Super-Agent with the DICT form — not flat keys.** As of **2.4.123** `super_agent:` accepts either a bool (`true` = on with defaults) **or a dict** of tuning keys, and as of **2.4.131 the dict is the ONLY way to tune it** (the three `LEAFMESH_SUPER_AGENT_*` env vars are dead). The old **flat** keys — `super_agent_cost_ceiling`, `super_agent_step_cap`, `super_agent_reflection_budget`, `super_agent_wall_clock`, `synth_max_tokens_floor/ceiling` — were **never wired** (accepted only as `extra='allow'` and ignored); **do not use them.** Allowed **dict** keys and defaults:
+>
+> | Dict key | Default | Governs |
+> |---|---|---|
+> | `cost_ceiling` | `50000` | aggregate token budget for one run |
+> | `wall_clock` | `600` | per-run wall-clock seconds |
+> | `step_max_tokens` | — | cap per plan step |
+> | `synth_max_tokens` | — | cap on the final synthesis call |
+> | `verify_view_chars` | — | chars of context the verify phase sees |
+> | `goal_check_view_chars` | `12000` | chars the goal-check phase sees |
+> | `step_concurrency` | `4` | parallel plan steps when the `depends_on` DAG allows |
+>
+> Any key you omit takes the SDK default. `super_agent: true` is the shorthand for "on, all defaults".
 
 ### Super-Agent v3 Fields
 
@@ -324,13 +352,13 @@ agents:
   research_synthesiser:
     agent_type: "llm"
     model: "claude-sonnet-4-6"
-    super_agent: true
-    super_agent_cost_ceiling: 100000
-    super_agent_step_cap: 12
-    super_agent_reflection_budget: 2
-    super_agent_wall_clock: 900
-    synth_max_tokens_floor: 16384
-    synth_max_tokens_ceiling: 32768
+    super_agent:                         # DICT form = the tuning path (2.4.123+); the ONLY way to tune it
+      cost_ceiling: 100000               # aggregate token budget for one run (default 50000)
+      wall_clock: 900                    # per-run wall-clock seconds (default 600)
+      synth_max_tokens: 32768            # cap on the final synthesis call
+      goal_check_view_chars: 12000       # chars the goal-check phase sees (default 12000)
+      step_concurrency: 4                # parallel plan steps when the DAG allows
+    # (super_agent: true is the shorthand — on with all defaults)
     prompt: |
       You are a research synthesiser. Plan the investigation, execute
       each step, verify outputs against expected outcomes, and produce
@@ -363,10 +391,15 @@ agents:
       names:                             # REQUIRED, non-empty — empty list clears the field (no skills)
         - "refund_flow"
         - "account_migration"
+        - "tone"
+      eager:                             # (2.4.123) full-body in the prompt; the rest stay lazy
+        - "tone"                         # every name here MUST appear in `names` or load fails
 
     # Shortform — routed to the "default" source (HOSTED):
     # skills: ["refund_flow", "account_migration"]
 ```
+
+> **`eager` vs lazy:** `names` are advertised in a compact index and fetched on demand via `load_skill_reference`. `eager: [...]` ships those skills' full bodies resident in the prompt — for the one skill that is *always* relevant (house tone, a policy matrix). Every `eager` name is validated against `names` at load, so a typo fails fast instead of silently delivering nothing. Fleet default is the `LEAFMESH_SKILLS_EAGER` env var; the per-agent `skills_eager: true` field forces all-eager.
 
 **Source registration is NOT in YAML** — there is no top-level `skills:`
 block (the loader rejects unknown top-level keys). Register sources via
@@ -595,20 +628,20 @@ These fields are used when `agent_type` is `"human"`. `is_human_powered` is auto
 
 | Value | Description | How it works |
 |-------|-------------|-------------|
-| `default` | **ADK-Frontend HITL Inbox** (recommended) | Writes request to Redis, emits stream event. ADK-Frontend renders an inbox with conversation thread. Human replies via the UI. Supports parallel requests per session. |
+| `default` | **hosted HITL Inbox (LeafCraft Studio)** (recommended) | Writes request to Redis, emits stream event. the hosted inbox renders an inbox with conversation thread. Human replies via the UI. Supports parallel requests per session. |
 | `webhook` | **External webhook** | POSTs request to `webhook_config.outbound_url`. Human responds via inbound webhook endpoint. Also supports native channel adapters (Slack, Telegram, etc.). |
-| `api` | **Python callback** | Calls a Python handler registered via `sdk.register_human_handler()`. No outbound HTTP. Used for custom integrations and testing. |
+| `api` | **Python callback** | Calls a Python handler registered via `sdk.agent_registry.register_human_agent(name, human_interface_handler=fn)` (or `sdk.agent_registry.update_human_interface_handler(name, fn)` to attach a handler to an already-declared human agent). **There is no `sdk.register_human_handler()`** — that method does not exist in 2.4.33. No outbound HTTP. Used for custom integrations and testing. |
 | `custom` | **Custom handler** | Same as `api` — uses the registered `human_interface_handler` callback. |
 
 > **Note:** `default` is only available on the LeafMesh hosted platform. For self-hosted deployments, use `webhook` with your own `outbound_url`, or `api` with a Python callback.
 
-### Example — Default (ADK-Frontend Inbox)
+### Example — Default (hosted HITL Inbox)
 
 ```yaml
 agents:
   support_human:
     agent_type: human
-    human_interface: default          # ADK-Frontend inbox
+    human_interface: default          # hosted HITL inbox
     human_timeout_seconds: 300
     yields:
       resolution: string
@@ -636,9 +669,9 @@ agents:
 
 Human agents support two interaction patterns via the same webhook endpoint:
 
-**Scenario 1 — Resume (session_id present):** When a POST to `/webhook/{entry_point}` includes a `session_id` that matches a pending HITL request, the ADK resumes that session. The operator's response is routed via `can_call` to the next agent.
+**Scenario 1 — Resume (session_id present):** When a POST to `/webhook/{entry_point}` includes a `session_id` that matches a pending HITL request, the SDK resumes that session. The operator's response is routed via `can_call` to the next agent.
 
-**Scenario 2 — New (no session_id or not found):** When a POST has no `session_id` or the session has no pending expectation, the ADK creates a new workflow. If the human agent has no upstream caller, the operator's message is immediately routed via `can_call` — no HITL pending step is created.
+**Scenario 2 — New (no session_id or not found):** When a POST has no `session_id` or the session has no pending expectation, the SDK creates a new workflow. If the human agent has no upstream caller, the operator's message is immediately routed via `can_call` — no HITL pending step is created.
 
 ---
 
@@ -735,7 +768,16 @@ Connects to an external AutoGen Studio or custom AutoGen API service via HTTP.
 | `max_poll_seconds` | float | `300.0` | no | — | Max total polling time (seconds) |
 | `http_timeout` | float | `30.0` | no | — | HTTP request timeout (seconds) |
 
-#### mcp
+#### mcp (as a connector — one tool, one agent)
+
+> **Read this first — there are two ways to use MCP, and this is the older,
+> narrower one.** What follows describes MCP as a *connector*: the whole agent
+> becomes a single call to a single remote tool, named by `tool_name`.
+>
+> If what you want is "this agent can use the tools that server offers", you
+> want the **agent-level `mcp:` block** instead — see *MCP servers as tools*
+> below. That is the right default. Reach for the connector form only when the
+> agent genuinely *is* one remote call and nothing else.
 
 MCP supports two transport modes. `tool_name` is always required.
 
@@ -761,6 +803,59 @@ MCP supports two transport modes. `tool_name` is always required.
 |-------|------|---------|----------|-------------|
 | `url` | string | `""` | **yes** (http) | MCP server HTTP/SSE endpoint |
 | `auth_token` | string | `""` | no | Bearer token |
+
+---
+
+### `mcp:` — MCP servers as tools (the normal way)
+
+**This is the one you almost always want.** An agent declares the MCP servers it
+may reach, and every tool those servers publish joins the tool list its model
+already sees. No separate registration, and you do **not** name the tools again
+under `tools:`.
+
+```yaml
+agents:
+  - name: research_agent
+    agent_type: llm
+    model: gpt-4o-mini
+    mcp:
+      - url: https://mcp.example.com/sse
+        token: ${MCP_SEARCH_TOKEN}
+        use: [search_docs, fetch_page]   # omit to expose every tool
+      - transport: stdio                  # a server you launch yourself
+        command: python
+        args: [./servers/inventory.py]
+        name: inventory
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `transport` | string | `"http"` | `"http"` for a hosted server, `"stdio"` for one you launch |
+| `url` | string | `""` | Endpoint — **required** for `http` |
+| `command` | string | `""` | Executable — **required** for `stdio` |
+| `args` | list | `[]` | Arguments for the stdio command |
+| `token` | string | `""` | Auth token — keep it in an env var: `${MY_TOKEN}` |
+| `use` | list | `[]` | Only expose these tools; empty means all of them |
+| `name` | string | derived | Namespace prefix; derived from the server when unset |
+| `timeout` | float | `30.0` | Per-call timeout in seconds |
+
+**Things that will bite you if you don't know them:**
+
+- **Tools are namespaced.** A tool arrives as `<server>_<tool>` — `inventory_search`,
+  not `search` — so two servers can both publish `search` without colliding.
+- **`tools:` is a positive allowlist for LOCAL tools only.** MCP tools are merged
+  in automatically. An agent whose tools are all remote can omit `tools:`
+  entirely; adding the MCP tool names there does nothing useful.
+- **Scoped to the declaring agent.** Another agent cannot call your server's
+  tools unless it declares the server too. Same rule as local tools.
+- **They run like any other tool** — same permission check, same timeout, same
+  guardrail on tool output, same execution record. A model can call an MCP tool
+  and a local tool in the same turn, in parallel or in sequence.
+- **A server that is down at startup does not stop the agency.** The agent starts
+  without that server's tools and logs a warning.
+- **Set `tool_choice` / `allow_parallel_tool_calls` on the agent as usual** — they
+  apply to MCP tools too (SDK ≥ 2.4.112; earlier builds dropped these settings
+  when saving an agent that had no local `tools:`).
 
 #### zapier
 
@@ -1054,6 +1149,7 @@ Used inside `webhook_config` for human agents.
 | `response_mapping` | dict | `{}` | Field mapping for webhook response transformation |
 | `max_retries` | int | `3` | Max retry attempts for failed outbound webhooks |
 | `retry_delay` | int | `5` | Delay between retries (seconds) |
+| `operators` | dict | *(no schema default)* | Declared field (verified in `leafmesh.core.agent_config`). Per-operator routing map (operator name → external address/ID) for directing a human agent's outbound to a specific person. |
 
 ---
 
@@ -1080,6 +1176,7 @@ Used inside `channels` dict for human agents. Keys are provider names.
 | `listen_channels` | list | `[]` | Channel/chat IDs to accept inbound messages from (empty = all) |
 | `post_channel` | string | `null` | Default channel/chat ID for outbound messages (see per-provider notes below) |
 | `verify_token` | string | `null` | Webhook verification token — **WhatsApp only** (`hub.verify_token`) |
+| `operators` | dict | *(no schema default)* | Declared field (v2.2.44+). Per-operator routing map: operator name → provider address/ID (e.g. Slack user ID for a DM). Used to route a human agent's message to a specific person. See the example below. |
 
 **Note:** `ChannelConfig` allows extra fields (`extra="allow"`) for any provider-specific config.
 
@@ -1151,10 +1248,12 @@ channels:
 ```python
 from leafmesh import pre_compose
 
-@pre_compose(input_data=lambda data, ctx: {
+@pre_compose(input_processor=lambda data, ctx: {
     **data,
     "_target_operator": _todays_oncall(),    # "alice" Mon, "bob" Tue, ...
-})
+})   # NOTE: the kwarg is `input_processor` (the real @pre_compose params are
+     # context_processor / input_processor / others_processor). `input_data=`
+     # is NOT a recognized processor — it silently lands in **processors and never runs.
 async def escalation_agent(input_data, context):
     return {"alert": input_data["incident"]}
 ```
@@ -1448,6 +1547,8 @@ escalation:
 | `data_structures` | dict | `{}` | name → DataStructure | Custom data type definitions |
 | `auto_discover` | dict | `null` | `{"directory": "path", "pattern": "*.py", "recursive": true}` | Auto-discover agent files |
 | `evolution` | object | see [EvolutionConfig](#evolutionconfig) | — | Evolutionary optimization |
+| `api` | object | see [APIConfig](#apiconfig) | — | Declared top-level field. HTTP API server config (host/port/etc.). Because `LeafMeshConfig` is `extra="forbid"`, `api` must appear here, not as an extra. |
+| `evolution_api` | object | *(no schema default)* | — | Declared top-level field (in 2.4.33). Config for the evolution API surface. Distinct from `evolution`. |
 | `brokers` | dict | `{}` | name → KafkaBrokerConfig \| SQSBrokerConfig \| MQTTBrokerConfig \| RedisStreamsBrokerConfig \| IMAPBrokerConfig | External broker connection definitions for [Event Listeners — BRD-021](#event-listeners--brd-021). Referenced by name from each agent's `listen_events:` block |
 
 **Note:** `LeafMeshConfig` has `extra="forbid"` — unknown top-level keys will raise a validation error.
@@ -1469,6 +1570,15 @@ escalation:
 | `agent_timeout_threshold` | int | `180` | seconds | Seconds before agent is timed out |
 | `escalation` | object | `null` | see [EscalationConfig](#escalationconfig) | Escalation targets and rules |
 | `routing` | dict | see below | — | Manager routing configuration |
+| `feed_model` | string | `null` | same as [Model List](#model-list) | Optional separate model for the Manager's live activity-feed narration (falls back to `model`). |
+| `temperature` | float | `0.1` | `0.0` – `2.0` | Temperature for the Manager/Summarizer analysis call. |
+| `max_tokens` | int | `800` | 1 – model max | Max output tokens for the Manager analysis call. |
+| `analysis_style` | string | `"coordination"` | e.g. `coordination` | Style/persona applied to the Summarizer's analysis. |
+| `omnipresent_mode` | bool | `true` | `true`, `false` | When true, the Manager observes every agent turn; false narrows its attention. |
+| `triggers` | dict | `{}` | arbitrary | Declarative triggers for Manager intervention. |
+| `yields` | dict | `null` | yield contract | Optional yields contract for the Manager's own output. |
+| `super_agent` | bool | `false` | `true`, `false` | Wrap the Manager's analysis in the Super-Agent orchestrator. |
+| `knowledge` | bool \| object | `false` | `false`, or see [Knowledge Config](#knowledge-config) | Knowledge/RAG config available to the Manager. Defaults to `false` (off); set an object to enable. |
 
 ### `manager.prompt` — Evaluation Criteria
 
@@ -1547,6 +1657,8 @@ manager:
 |-------|------|---------|-------------|
 | `call_timeout` | int | `30` | Call timeout in seconds |
 | `max_chain_events` | int | `50` | Hard cap on chain events per session before the cycle breaker stops the chain (session `status: stopped` + `ChainCapExceeded` AGENT_ERROR; a new entry-point call on the session resets it). Raise for legitimately deep flows (research / batch fan-out) — never as a fix for an unbounded retry back-edge |
+| `chain_context_depth` | int | `0` | Declared field. How many prior chain hops of context to carry forward to a downstream agent (`0` = none). |
+| `chain_context_max_chars` | int | `500` | Declared field. Character budget for the carried-forward chain context (truncated beyond this). |
 | `bedrock` | object | `null` | AWS Bedrock config |
 | `vertex` | object | `null` | Google Vertex AI config |
 | `foundry` | object | `null` | Microsoft Foundry/Azure AI config |
@@ -1621,6 +1733,50 @@ mesh:
 
 ---
 
+## Runtime Config Blocks (2.4.131) — `timeouts` / `scheduler` / `runtime` / `limits` / `connectors`
+
+**2.4.131 moved ~49 runtime knobs out of `LEAFMESH_*` environment variables into five declared top-level YAML blocks. The old env vars are NO LONGER READ** — a template or `.env` that still sets them silently gets defaults. These are top-level siblings of `mesh:` / `manager:`.
+
+Three rules for template authors:
+1. **Every field is optional and omission is meaningful.** Blank = "not declared" → the SDK default applies and the key stays out of the YAML. **Do NOT pre-fill these with defaults** — that writes a choice the operator never made. Declare a block only where the template genuinely needs a non-default (e.g. a long-running research agency setting `timeouts.llm_hard_timeout_s: 300`).
+2. **Booleans are tri-state:** absent / `true` / `false`, and an explicit `false` ≠ absent (it round-trips through save+reload).
+3. **Two knowledge *document* caps went per-provider, not into `limits`:** `settings.max_docs_per_ingest` (1000) and `settings.max_doc_bytes` (2 MiB) live under a knowledge provider's `settings:`.
+
+```yaml
+timeouts:                       # 8 fields
+  llm_hard_timeout_s: 90        # per LLM call; retried once then fails (super-agent phases get 600)
+  mesh_call_default_timeout_s: 300
+  super_agent_max_dispatch_s: 14400
+  # + tool-loop multiplier/cap, ack/SSE/HITL-redrive
+scheduler:                      # 7 fields
+  cron_min_interval_seconds: 60 # floor; lower it to allow sub-minute intervals like "30s"
+  misfire_grace_s: 3600
+  # + follow-up tick/max-delay/TTL, HITL reaper interval+grace
+runtime:                        # 9 fields
+  lease_seconds: 30
+  dispatch_claim_ttl_s: ...     # + pub/sub poll+ping+dead windows, reclaim_min_idle_ms, config_sync_poll_s
+limits:                         # 14 fields
+  max_parallel_tool_calls: 8
+  tool_result_max_chars: 100000
+  max_session_history_bytes: ...
+  consumer_inflight_max: 64
+  # + webhook payload/rate/replay, knowledge ingest+query caps, tool_failure_breaker
+connectors:                     # 3 fields — all default true
+  traceparent_inject: true
+  external_usage_stamp: true
+  external_trace_capture: true
+
+mesh:
+  reply_stream: false           # default false; always ON in workers mode regardless
+```
+
+**Dead env vars (no longer read — migrate to the blocks above):** `LEAFMESH_LLM_HARD_TIMEOUT_S`, `LEAFMESH_CRON_MIN_INTERVAL_SECONDS`, `LEAFMESH_WEBHOOK_{MAX_PAYLOAD_BYTES,RATE_LIMIT_MAX,RATE_LIMIT_WINDOW_S,REPLAY_SKEW_S}`, `LEAFMESH_MAX_SESSION_HISTORY_BYTES`, `LEAFMESH_MAX_PARALLEL_TOOL_CALLS`, `LEAFMESH_KNOWLEDGE_*` (all), `LEAFMESH_MESH_REPLY_STREAM`, `LEAFMESH_SUPER_AGENT_*` (→ per-agent `super_agent:` dict), `LEAFMESH_MANAGER_*_TAIL`.
+**Still legitimately env:** `LEAFMESH_LICENSE_KEY`, `LEAFMESH_ENV_TOKEN`, `WEBHOOK_SECRET`, `INTERNAL_API_KEY`, `API_URL`/`API_PORT`, `EVOLUTION_API_PORT`, `SSE_COOKIE_SAMESITE`, `WORKERS`(_MODE), `OTEL_REDACT_PII`, `DISABLE_PROMPT_GUARDRAIL`, `WEBHOOK_ALLOW_LEGACY_HMAC`, `MCP_COMMAND_ALLOWLIST`, `TEAMS_ALLOW_UNVERIFIED`, `YAML_ENV_BLOCKLIST(_EXTRA)`, `HSTS_ENABLED`, `REFERRER_POLICY`, `CSP`, `LEAFMESH_SKILLS_DIR`, `LEAFMESH_SKILLS_EAGER`.
+
+> ⚠️ **The `timeouts` block is REJECTED by ≤2.4.130** (`from_yaml` raises `ConfigError`) — it is only valid on **2.4.131+**. Ship these blocks only when the template floor is `leafmesh>=2.4.131`.
+
+---
+
 ## RedisConfig
 
 | Field | Type | Default | Description |
@@ -1632,7 +1788,7 @@ mesh:
 | `decode_responses` | bool | `true` | Decode Redis responses |
 | `auto_storage` | bool | `true` | Enable automatic data storage |
 | `default_ttl` | int | `3600` | Default TTL (seconds) |
-| `session_ttl` | int | `7200` | Session TTL (seconds) |
+| `session_ttl` | int | `604800` | Session TTL (seconds). Default is **604800 (7 days)**, not 7200. |
 | `cluster_mode` | bool | `false` | Use Redis cluster |
 | `cluster_nodes` | list | `[]` | Cluster node addresses (strings) |
 | `ssl` | bool | `false` | Enable TLS for Redis connection |
@@ -1646,11 +1802,11 @@ mesh:
 
 ## APIConfig
 
-Top-level `api:` block Configures the ADK's HTTP server.
+Top-level `api:` block Configures the SDK's HTTP server.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `cors_origins` | list[string] | `[]` | Additional CORS origins, appended to the ADK's built-in defaults (`https://platform.leafcraft.ai` + localhost dev ports). Each entry must be a full origin (`scheme://host[:port]`). |
+| `cors_origins` | list[string] | `[]` | Additional CORS origins, appended to the SDK's built-in defaults (`https://platform.leafcraft.ai` + localhost dev ports). Each entry must be a full origin (`scheme://host[:port]`). |
 
 ---
 
@@ -1762,7 +1918,7 @@ entry_points:
 
 ## Validation Rules
 
-These are enforced by Pydantic validators in the ADK:
+These are enforced by Pydantic validators in the SDK:
 
 | Rule | Constraint |
 |------|-----------|
@@ -1829,8 +1985,17 @@ Shows which fields are **used** (U), **ignored** (—), or **required** (R) for 
 | `integration` | — | — | U | — |
 | `communication_type` | U | U | U | U |
 | `parallel` | U | U | U | U |
+| `monthly_token_budget` | U | U | U | U |
+| `monthly_cost_budget` | U | U | U | U |
+| `budget_on_exhaust` | U | U | U | U |
+| `cache` | ✓ | — | — | — |
+| `strict_tools` | ✓ | — | — | — |
+| `memory_strategy` | ✓ | — | — | — |
+| `knowledge_strategy` | ✓ | — | — | — |
+| `wake_up_input` | U | U | U | U |
 | `max_concurrent` | U | U | U | U |
 | `wake_up` | U | U | U | U |
+| `timezone` | U | U | U | U |
 | `listen_events` | U | U | U | U |
 | `yields` | U | U | U | U |
 | `inputs` | U | U | U | U |

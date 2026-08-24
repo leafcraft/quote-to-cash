@@ -1,6 +1,7 @@
 # quote-to-cash — example scenarios
 
-Four realistic scenarios that exercise the major paths through this mesh.
+Four realistic scenarios that exercise the major paths through the pod —
+from an RFQ all the way to cash.
 
 ## How to run
 
@@ -9,15 +10,26 @@ python examples/run_examples.py                 # all scenarios
 python examples/run_examples.py 01_             # one scenario (substring match)
 ```
 
+> Needs Tier 1 in `.env` (license + model keys + Redis) — the whole LLM
+> chain runs day-0 against the seeded price book / invoice store, no
+> connector required.
+
 ## Scenario map
 
-- **01_rfq_standard** — `rep_initiated` — Sales rep files a standard RFQ — line items, target close. Routes through cost calc → discount policy (tier-1) → deal-desk approval.
-- **02_steep_discount_finance** — `rep_initiated` — Rep proposes 28% discount — triggers tier-3 path → finance_approver_human. Requires rationale.
-- **03_competitor_price_change** — `competitor_price_change` — Competitor cut prices — discount tier matrix is refreshed.
-- **04_renewal_uplift_bundle** — `renewal_uplift_bundle` — Renewal up for quote — bundle_recommender proposes adding a complementary product + tier bump.
+- **01_rfq_rep_selfapprove** — `rep_initiated` — a small, healthy, low-discount
+  deal. Cass prices it from the price book; the approval matrix routes it to the
+  sales rep's own self-approval tier → drafter → issuer.
+- **02_rfq_deep_discount_cfo** — `rfq_email` — a large deal with a deep discount
+  ask. The pricing floor recomputes a below-floor margin / >30% discount, so the
+  matrix FORCES the CFO tier deterministically — the model cannot dodge it.
+- **03_quote_accepted_invoice** — `quote_accepted` — the customer accepted; billing
+  raises the invoice. The atomic claim means one billing copy wins the single job.
+- **04_dunning_sweep** — `dunning_sweep` — the overdue backlog. Billing fans out
+  across `instances`; each copy atomically claims a DISJOINT batch and duns it.
+  Severely overdue accounts escalate to the RevOps Lead.
 
 ## Audit trail
 
-Every scenario appends one hash-chained entry to the template's
-`logs/<audit>.jsonl` file. Tail it during a run to see the
-ledger build up across scenarios.
+Every scenario appends hash-chained entries to `logs/qtc_audit.jsonl`. Tail it
+during a run to watch the ledger build up. On an approved deal the issuer also
+renders the real quote artifact to `out/<quote_id>.pdf` (or `.md`).

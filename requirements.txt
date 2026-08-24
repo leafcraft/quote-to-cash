@@ -1,4 +1,4 @@
-leafmesh>=2.4.0
+leafmesh>=2.4.131
 
 # Scheduler (enables wake_up cron in YAML)
 apscheduler>=3.10.0

@@ -1,0 +1,9 @@
+{
+  "_entry_point": "quote_accepted",
+  "_description": "The customer accepted a quote — billing raises the invoice (invoice mode). The atomic claim means exactly one billing copy wins the single accepted quote.",
+  "data": {
+    "mode": "invoice",
+    "quote_id": "Q-RFQ-2026-0011",
+    "customer_id": "INITECH-9001"
+  }
+}

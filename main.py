@@ -1,4 +1,14 @@
-"""quote-to-cash — Quote to Cash."""
+"""quote-to-cash — Quote-to-Cash Pod (LeafMesh).
+
+Boot order matters (SDK 2.4.131):
+  1. import agency.tools  -> the @global_tool decorators run BEFORE from_yaml/
+     start, so Cass's price/history/competitor tools and billing's
+     read/claim tools are registered.
+  2. LeafMesh.from_yaml(...) -> auto_discover wires agency/*_agent.py to YAML.
+  3. audit_logger.register(...) -> attach the WORM sink to the custom external
+     qtc_audit_logger_agent (after from_yaml, before start).
+  4. leafmesh.start().
+"""
 import asyncio
 import signal
 import sys
@@ -6,6 +16,7 @@ import sys
 from dotenv import load_dotenv
 from leafmesh import EventType, LeafMesh, LeafMeshLogger
 
+import agency.tools  # noqa: F401 — registers @global_tool tools before start()
 from agency._shared import audit_logger as _audit_logger
 
 load_dotenv()

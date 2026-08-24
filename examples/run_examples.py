@@ -17,8 +17,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# Register the audit connector before SDK start
-import agency._shared.audit_logger  # noqa: F401
+# Register the @global_tool tools BEFORE from_yaml/start (boot order).
+import agency.tools  # noqa: F401
+from agency._shared import audit_logger as _audit_logger
 
 from leafmesh import LeafMesh, LeafMeshLogger
 
@@ -29,8 +30,9 @@ EXAMPLES_DIR = Path(__file__).parent
 async def run_scenario(sdk: LeafMesh, scenario_path: Path) -> None:
     scenario = scenario_path.stem
     payload = json.loads(scenario_path.read_text())
-    entry_point = payload.pop("_entry_point", "manual_action")
+    entry_point = payload.pop("_entry_point", "rfq_email")
     description = payload.pop("_description", "")
+    payload = payload.get("data", payload)
     print()
     print("=" * 78)
     print(f"  SCENARIO: {scenario}")
@@ -66,6 +68,7 @@ async def main() -> int:
         return 1
 
     sdk = LeafMesh.from_yaml("configs/config.yaml")
+    _audit_logger.register(sdk, "qtc_audit_logger_agent")
     await sdk.start()
     try:
         for scenario_path in scenarios:

@@ -97,7 +97,7 @@ agents:
 
   domain_expert:
     agent_type: "llm"
-    model: "claude-sonnet-4-5-20250929"
+    model: "claude-sonnet-4-6"
     prompt: "Provide domain expertise and analysis."
 
   synthesizer_agent:
@@ -167,7 +167,7 @@ agents:
       retry_delay: 2
     can_call:
       - agent: "greeter_agent"
-        condition: "not calling_agent_response.from_agent"
+        condition: "not calling_agent_response.from_agent"   # works ONLY because human agents ALWAYS emit from_agent (maybe ""). Never `not` a field that can be absent — see gotcha #14
       - agent: "processor_agent"
         condition: "calling_agent_response.from_agent == 'greeter_agent'"
 
@@ -237,6 +237,7 @@ agents:
   daily_report_agent:
     agent_type: "programmatic"
     wake_up: "0 9 * * *"           # Every day at 9 AM
+    timezone: "Asia/Kolkata"       # …9 AM IST. Omit timezone and this fires at 9 AM UTC (2.4.124+)
     communication_type: "execute"   # Fire-and-forget
 
   hourly_monitor_agent:
@@ -291,7 +292,7 @@ agents:
 
   complex_handler:
     agent_type: "llm"
-    model: "claude-sonnet-4-5-20250929"   # Best quality for hard tasks
+    model: "claude-sonnet-4-6"   # Best quality for hard tasks
     optimization_strategy: "performance"
     reasoning: true                # Provider-NATIVE extended thinking (claude-4 family supports it).
                                    # On a non-reasoning model (e.g. gpt-4o-mini) use thinking: true instead
@@ -343,16 +344,30 @@ agents:
     inputs: {data: object}
 ```
 
-The connector response is returned as-is. To post-process, add `@sdk.intelligence()`:
+The connector response is returned as-is. To post-process it, define a **shaper**
+function and register it as the agent's *intelligence*. `intelligence` takes the
+**agent name** as a required argument and is applied against the SDK instance at
+startup (e.g. in `main.py`) — it is **not** a bare `@sdk.intelligence()` stacked on
+the `def`. (This is exactly how the shipped templates register their audit sinks
+and connector shapers.)
 
 ### Programmatic + Connector + Python (post-process connector result)
 ```python
+# agency/zapier_sheets_agent.py
 async def zapier_sheets(connector_response, input_data, context):
     # connector_response = Zapier's raw response
     return {
         "status": "logged" if connector_response.get("success") else "failed",
         "row_id": connector_response.get("content", {}).get("id"),
     }
+```
+```python
+# main.py — register the shaper after loading the mesh:
+from leafmesh import LeafMesh
+from agency.zapier_sheets_agent import zapier_sheets
+
+sdk = LeafMesh.from_yaml("configs/config.yaml")
+sdk.intelligence("zapier_sheets")(zapier_sheets)   # "zapier_sheets" = the YAML agent key
 ```
 
 ### Using Zapier as @pre_compose helper (enrichment before LLM)
@@ -519,14 +534,15 @@ agents:
     agent_type: "llm"
     model: "claude-sonnet-4-6"
 
-    # — Super-Agent on-switch + budgets —
-    super_agent: true
-    super_agent_cost_ceiling: 100000        # max aggregate token cost per run
-    super_agent_step_cap: 12                 # max executable steps
-    super_agent_reflection_budget: 2         # max reflect-then-amend cycles
-    super_agent_wall_clock: 900              # 15 min hard wall-clock
-    synth_max_tokens_floor: 16384            # protect against Anthropic non-streaming truncation
-    synth_max_tokens_ceiling: 32768          # cost protection on synthesis
+    # — Super-Agent: the DICT is the tuning path (2.4.123+); the ONLY way to tune it —
+    super_agent:
+      cost_ceiling: 100000        # aggregate token budget per run (default 50000)
+      wall_clock: 900             # per-run wall-clock seconds (default 600)
+      synth_max_tokens: 32768     # cap on the final synthesis call
+      goal_check_view_chars: 12000  # chars the goal-check phase sees (default 12000)
+      step_concurrency: 4         # parallel plan steps when the DAG allows
+    # super_agent: true = on with all defaults. The flat super_agent_* keys were
+    # never wired, and LEAFMESH_SUPER_AGENT_* env vars are dead as of 2.4.131.
 
     prompt: |
       You are a research synthesiser. Given a research question, produce a
@@ -553,14 +569,15 @@ agents:
       open_questions: "list"
 
     can_call:
-      - target: "fact_checker_agent"
+      - agent: "fact_checker_agent"
         condition: "calling_agent_response.confidence < 0.7"
-      - target: "queue_manager_human"
+      - agent: "queue_manager_human"
         condition: "calling_agent_response.requires_expert_review == true"
 
 entry_points:
-  research_inbox:
+  - name: "research_inbox"
     target: "research_synthesiser"
+    condition: "always"
 ```
 
 ```bash
@@ -646,12 +663,13 @@ agents:
       requires_escalation: "boolean"
 
     can_call:
-      - target: "queue_manager_human"
+      - agent: "queue_manager_human"
         condition: "calling_agent_response.requires_escalation == true"
 
 entry_points:
-  customer_inbox:
+  - name: "customer_inbox"
     target: "support_agent"
+    condition: "always"
 ```
 
 ### Skills directory layout

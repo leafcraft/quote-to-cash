@@ -120,9 +120,27 @@ auto_discover:
   pattern: "*_agent.py"
   recursive: false
 
+# ── Persistence backend (`persistence`) — Redis (default) OR Postgres ──
+# Business-logic persistence (sessions, agent state, yields, feed, HITL) can
+# run on either backend. Omit the block entirely for Redis via the `redis:`
+# config. Postgres example:
+persistence:
+  backend: postgres          # redis (default) | postgres
+  host: db.internal          # Postgres connection
+  port: 5432
+  database: leafmesh
+  user: leafmesh_app
+  password: "${PG_PASSWORD}"
+  sslmode: require           # optional
+  default_ttl: 3600          # generic key TTL (seconds)
+  session_ttl: 604800        # session lifetime (7 days)
+  pool_min: 1
+  pool_max: 10
+
 # ── Manager (coordination + summarizer) ──
 manager:
-  enabled: true
+  # on by default — omit `enabled`; set `enabled: false` only to disable
+  # coordination + the summarizer entirely (rare; no interventions, no feed)
   model: "gpt-4o-mini"                 # Model for summarizer LLM calls
   domain: "generic"                     # Summarizer domain specialization
   can_intervene: true                   # Allow automatic interventions
@@ -234,7 +252,7 @@ can_call:
   - agent: "escalation"
     condition: "calling_agent_response.priority == 'high'"
   - agent: "greeter"
-    condition: "not calling_agent_response.from_agent"   # Falsy check (HITL routing)
+    condition: "not calling_agent_response.from_agent"   # works ONLY because human agents ALWAYS emit from_agent (maybe ""). Never `not` a field that can be absent — see gotcha #14   # Falsy check (HITL routing)
   - agent: "processor"
     condition: "calling_agent_response.from_agent == 'greeter_agent'"
   - agent: "urgent_handler"
@@ -516,6 +534,19 @@ Source fields by broker type:
 
 Delivery: **at-least-once**, idempotency on `(listener_name, message_id)`. After retries exhaust → DLQ if configured, otherwise dropped + logged.
 
+## Notable Stream Events (observability)
+
+| Event | When |
+|-------|------|
+| `llm.cost.tracked` | Token + USD cost, recorded once per provider call at the gate |
+| `llm.cache.hit` | Model text reused (agent function/decorators still ran fresh) |
+| `media.generated` | Image-generation call produced media (metadata only) |
+| `reflection.doomed_skipped` | Reflection skipped — null-vs-schema conflict; fix `nullable: true` or the prompt |
+| `session.result_dropped` | Completed work discarded (session already escalated) — loud, with the discarded keys |
+| `dispatch.dedup_suppressed` | Duplicate work unit suppressed (exactly-once) |
+| `manager.degradation` | Super-agent finished degraded; Manager reviewed without re-running |
+| `budget.exhausted` | Per-agent monthly budget tripped before spend |
+
 ## Feed Post Structure
 
 Each feed post contains:
@@ -558,8 +589,15 @@ Each feed post contains:
 | `COMPOSIO_API_KEY` | For Composio | Composio key |
 | `XAI_API_KEY` | For Grok models | xAI API key |
 | `MISTRAL_API_KEY` | For Mistral models | Mistral API key |
-| `LEAFMESH_LLM_HARD_TIMEOUT_S` | No | Hard ceiling on a single LLM provider call (default **90**s; timed-out calls are retried **once** with the same ceiling, then fail; super-agent phases get 600s automatically). Raise for long-running agents that legitimately produce big outputs |
+| ~~`LEAFMESH_LLM_HARD_TIMEOUT_S`~~ | **DEAD (2.4.131)** | Moved to YAML `timeouts.llm_hard_timeout_s` (default **90**s; timed-out calls retry **once**, then fail; super-agent phases get 600s). The env var is **no longer read** — set the YAML block. Raise for long-running agents with big outputs |
 | `LEAFMESH_SKILLS_DIR` | No | Root dir for `filesystem` skill sources when no `config.root` is set (default `./skills/`) |
+| `LEAFMESH_API_PORT` | No | Mesh API port (default **18820**) |
+| ~~`LEAFMESH_MAX_PARALLEL_TOOL_CALLS`~~ | **DEAD (2.4.131)** | Moved to YAML `limits.max_parallel_tool_calls` (default **8**). Env var no longer read |
+| ~~`LEAFMESH_SUPER_AGENT_STEP_CONCURRENCY`~~ | **DEAD (2.4.131)** | Now a per-agent super-agent dict key: `super_agent: {step_concurrency: N}` (default **4**). Env var no longer read |
+| `LEAFMESH_WORKERS_MODE` | No | `1` enables workers/HA mode — required for running more than one instance against one Redis (exactly-once events, singleton runners, cross-instance locks) |
+| `LEAFMESH_WORKERS` | No | Number of worker processes in workers mode |
+| `LEAFMESH_LEASE_SECONDS` | No | Singleton-runner lease window (default **30**). Raise (e.g. `120`) when Redis is remote over a flaky link so connectivity blips shorter than the window never flap leased runners; heartbeat auto-scales to a third of the window (2.4.107) |
+| `LEAFMESH_LEASE_HEARTBEAT` | No | Explicit lease heartbeat interval override (must be < lease window) |
 
 ## Webhook HMAC Authentication
 
