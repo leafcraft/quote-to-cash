@@ -3,7 +3,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: quote-to-cash-redis
-    ports: ["6379:6379"]
+    ports: ["${REDIS_HOST_PORT:-6379}:6379"]
     volumes: ["redis-data:/data"]
     command: redis-server --appendonly yes
     healthcheck:
@@ -21,7 +21,7 @@ services:
     environment:
       REDIS_HOST: redis
       REDIS_PORT: 6379
-    ports: ["18820:18820"]
+    ports: ["${LEAFMESH_PORT:-18820}:18820"]
     volumes: ["./logs:/app/logs"]
 volumes:
   redis-data:

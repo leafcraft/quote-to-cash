@@ -5,7 +5,7 @@
     "rfq_id": "RFQ-2026-1210",
     "customer_id": "GLOBEX-2210",
     "segment": "enterprise",
-    "target_close": "2026-09-30",
+    "target_close": "2026-12-15",
     "requested_discount_pct": 0.35,
     "line_items": [
       {"sku": "ENT-SEAT", "qty": 60, "list_price_cents": 220000},
