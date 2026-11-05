@@ -25,7 +25,7 @@ python examples/run_examples.py 01_             # one scenario (substring match)
 - **03_quote_accepted_invoice** — `quote_accepted` — the customer accepted; billing
   raises the invoice. The atomic claim means one billing copy wins the single job.
 - **04_dunning_sweep** — `dunning_sweep` — the overdue backlog. Billing fans out
-  across `instances`; each copy atomically claims a DISJOINT batch and duns it.
+  across its copies (`scaling.copies.count: 3`); each copy atomically claims a DISJOINT batch and duns it.
   Severely overdue accounts escalate to the RevOps Lead.
 
 ## Audit trail

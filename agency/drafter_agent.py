@@ -11,6 +11,11 @@ waive: validity is CAPPED by the deal's discount tier (a deeper discount
 gets a shorter shelf life), recovered from the per-session stash so the cap
 stands on the real tier even though the human gate dropped the chain
 payload. The drafter never auto-sends — it assembles; the issuer issues.
+
+The drafter is the agent the approving human seat calls, so it also records
+WHO approved (the reply's `source_agent`, e.g. deal_desk_human) and the
+verdict in the session stash. The issuer checks that seat against the tier
+the financials require.
 """
 from __future__ import annotations
 
@@ -21,13 +26,13 @@ from leafmesh import LeafMeshLogger, chain
 
 try:
     from ._shared import store
-    from ._shared.session_stash import resolve_session_id, stash_get
+    from ._shared.session_stash import resolve_session_id, stash_get, stash_put
 except ImportError:  # pragma: no cover
     import os
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from _shared import store  # type: ignore
-    from _shared.session_stash import resolve_session_id, stash_get  # type: ignore
+    from _shared.session_stash import resolve_session_id, stash_get, stash_put  # type: ignore
 
 logger = LeafMeshLogger(__name__)
 
@@ -98,8 +103,38 @@ def enforce_validity_floor(result: Any, context: dict) -> dict:
     return result
 
 
+_SEATS = ("sales_rep_human", "deal_desk_human", "finance_approver_human", "cfo_human")
+
+
+def _reply_field(input_data: dict, key: str) -> str:
+    sources = [input_data]
+    up = input_data.get("upstream_yields")
+    if isinstance(up, dict):
+        sources.append(up)
+        sources.extend(v for v in up.values() if isinstance(v, dict))
+    for src in sources:
+        val = src.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
+def _record_approval(input_data: Any, context: Any) -> None:
+    """Stash which approval seat cleared the deal, for the issuer's check."""
+    input_data = input_data if isinstance(input_data, dict) else {}
+    seat = _reply_field(input_data, "source_agent")
+    if seat not in _SEATS:
+        return
+    sid = resolve_session_id(input_data, context if isinstance(context, dict) else {})
+    if not sid:
+        return
+    stash_put(sid, {**stash_get(sid), "approved_by": seat,
+                    "human_message": _reply_field(input_data, "human_message").lower()})
+
+
 @chain(enforce_validity_floor)
 async def drafter_agent(llm_response: Any, input_data: dict, context: dict) -> dict:
+    _record_approval(input_data, context)
     out = llm_response if isinstance(llm_response, dict) else {}
     out.setdefault("quote_body", "")
     out.setdefault("validity_days", 0)

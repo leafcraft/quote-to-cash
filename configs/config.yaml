@@ -7,7 +7,7 @@
 # dun the overdue backlog.
 #
 # The pod is a TEAM, not a pipeline. Every wire is conditional; every
-# hand-off is a finished contract; every human gate default-denies on
+# hand-off is a finished contract; nothing is approved or issued on
 # silence; the finisher produces the real artifact and fails closed; the
 # WORM sink is the terminus. Systems (CPQ / ERP / CLM / billing) are TOOLS
 # inside agents, never members.
@@ -26,26 +26,16 @@ environment: "development"
 debug: true
 log_level: "INFO"
 
-persistence:
-  backend: redis
-  redis:
-    host: "${REDIS_HOST:localhost}"
-    port: ${REDIS_PORT:6379}
-    db: 0
-    password: "${REDIS_PASSWORD:}"
-    auto_storage: true
-    decode_responses: true
-    default_ttl: 86400
-    session_ttl: 604800
-
 auto_discover:
   directory: "./agency"
   pattern: "*_agent.py"
   recursive: false
 
-# The Manager is the SUPERVISOR — it watches every hand-off and escalates
-# stalls / contract violations / repeated errors to the RevOps Lead. It is
-# not a router in the middle of the team.
+# The Manager is the SUPERVISOR. It escalates to the RevOps Lead when an
+# agent fails with an error that a retry cannot fix (auth, bad request,
+# credit, bad config), when 5 different agents fail in one session, or when
+# restarts run out. A broken hand-off contract only raises an alert. It does
+# not chase an unanswered approval. It is not a router in the middle of the team.
 manager:
   model: "gpt-4o-mini"
   domain: "generic"
@@ -55,11 +45,11 @@ manager:
     to exactly ONE human tier (rep / deal-desk / finance / CFO) -> the
     drafter assembles the quote -> the issuer renders + issues the artifact,
     failing closed on any under-approved deal -> billing invoices accepted
-    quotes and duns the overdue backlog. Escalate to the RevOps Lead when: a
-    deal loops on rework past its bound, margin falls below floor or a
-    discount exceeds tier, an approval round times out, billing surfaces a
-    severely overdue account, or any agent hands off a malformed artifact.
-    Silence never advances a deal.
+    quotes and duns the overdue backlog. A deal still incomplete after its
+    rework bound and a severely overdue account (45+ days) go to the RevOps
+    Lead on the agents' own wires; a below-floor margin or a deep discount
+    goes to the CFO tier on Cass's matrix. Nothing is approved or issued on
+    silence.
   routing:
     mode: static
   escalation:
@@ -69,16 +59,13 @@ manager:
     auto_escalate:
       max_retries: 3
       max_errors_per_session: 5
-      timeout_threshold: 2
-
-mesh:
-  call_timeout: 150
 
 # 2.4.131 runtime block — deal shaping (super-agent, many SKUs + competitive
 # signals) and Claude drafting can run long. Everything else stays default
 # (omission is meaningful; we do not pre-fill defaults). The `timeouts` block
 # is rejected by <=2.4.130, so it lands WITH the 2.4.131 floor.
 timeouts:
+  mesh_call_default_timeout_s: 150
   llm_hard_timeout_s: 300
 
 # ── Entry points — one per real-world trigger ────────────────────────────────
@@ -107,7 +94,7 @@ entry_points:
     target: "billing_agent"
     description: "Scheduled/manual sweep of overdue invoices (billing, dun mode)."
     condition: always
-  # ── HITL resume — a human answers in the channel they were notified in ──
+  # ── HITL resume — a human answers in Studio's Inbox ──
   - name: "rep_reply"
     target: "sales_rep_human"
     description: "HITL resume — the sales rep approves / rejects / resubmits."
@@ -167,7 +154,7 @@ agents:
       action: "string"          # open_case | status | escalate
       rfq_id: "string"
       customer_id: "string"
-      line_items: "list"
+      line_items: {type: array, items: object}   # {sku, qty, list_price_cents} — echoed unchanged
       target_close: "string"
       segment: "string"
       stage: "string"
@@ -228,7 +215,7 @@ agents:
       rfq_id: "string"
       customer_id: "string"
       segment: "string"
-      line_items: "list"
+      line_items: {type: array, items: object}   # {sku, qty, list_price_cents} — re-priced from the price book by the floor
       discount_pct: "number"          # clamped 0..1 by the @chain floor
       rationale: "string"
       deal_desk_briefing: "string"
@@ -238,7 +225,7 @@ agents:
       tier: "string"                  # derived from the policy bands (floor)
       has_regulated_sku: "boolean"    # set from the price book (floor)
       is_complete: "boolean"          # FORCED by the completeness floor — gates routing below
-      missing_fields: "list"          # which required fields are absent (floor)
+      missing_fields: {type: array, items: string}   # which required fields are absent (floor)
       intake_status: "string"         # complete | incomplete (floor)
       rework_round: "number"          # bounded back-edge counter (floor)
       rework_exhausted: "boolean"     # rework bound hit -> terminal route (floor)
@@ -285,14 +272,14 @@ agents:
     # itself (available:false) when it has no real source. See agency/tools.py.
     tools: [read_price_book, read_deal_history, read_competitor_prices]
     tool_categories: [shaping]
-    # ── To wire a real CPQ/ERP price book, uncomment and set the URL (each
-    #    named action under `use:` becomes its own tool, e.g. cpq_read_price_book).
-    #    NOTE: the SDK rejects an http mcp block with an EMPTY url at load, so
-    #    this ships COMMENTED — fill the URL, then uncomment. ──
+    # ── To wire a real CPQ/ERP price book: create the vault connection
+    #    'cpq_mcp' on Infrastructure → Integrations → MCP (the MCP server's
+    #    URL + token live there, never here), then uncomment — here before the
+    #    first start, in Studio's YAML editor after it (applies live, no restart).
+    #    Each named action under `use:` becomes its own tool, e.g. cpq_read_price_book. ──
     # mcp:
-    #   - transport: http
-    #     url: "${CPQ_MCP_URL}"
-    #     token: "${CPQ_MCP_TOKEN:}"
+    #   - connection: cpq_mcp   # vault connection holds the URL + token
+    #     transport: http
     #     use: [read_price_book, read_deal_history, read_competitor_prices]
     #     name: cpq
     #     timeout: 30
@@ -378,30 +365,35 @@ agents:
   # quote_issuer_agent — the ARTIFACT-PRODUCING EXECUTOR (FINISHER). Runs after
   # the deal is approved + drafted and GENERATES + ISSUES the quote as a real
   # artifact to ./out/<quote>.pdf (ReportLab if present, else a deterministic
-  # .md — always a real file, day-0, no extra deps), plus a CPQ push via
-  # ${CPQ_WEBHOOK_URL:} (inert until set; a dev-store fallback records the
-  # issued quote). Backed by agency/quote_issuer_agent.py:
+  # .md — always a real file, day-0, no extra deps), plus a CPQ push to the
+  # vault record 'cpq_webhook' (Infrastructure → Add custom → 'Outbound
+  # webhook'; until it exists a dev-store fallback records the issued quote
+  # and cpq_pushed is false). The push happens only after the approval check
+  # passes. Backed by agency/quote_issuer_agent.py:
   #   @chain enforce_issuance_floor — FAIL CLOSED: never issues a quote that
   #     wasn't approved, or whose discount TIER wasn't cleared by the REQUIRED
   #     approver — re-derived IN CODE from the financials (the same matrix
-  #     Cass's wires encode). On a trip the artifact is DELETED and the result
-  #     marked blocked. The WORM sink still records the attempt.
+  #     Cass's wires encode) and compared with the seat that actually approved
+  #     (recorded by the drafter from the reply). On a trip nothing is
+  #     rendered or pushed, any artifact is DELETED and the result marked
+  #     blocked. The WORM sink still records the attempt.
   # ─────────────────────────────────────────────────────────────────────────
   quote_issuer_agent:
     name: "quote_issuer_agent"
     agent_type: "programmatic"
     communication_type: "chain"
     description: "Artifact-producing executor — renders + issues the approved quote to ./out/<quote>.pdf (or .md); a fail-closed floor blocks any unapproved / under-approved quote and deletes the partial."
-    # CPQ push is a custom urllib actuator inside the agent body reading
-    # ${CPQ_WEBHOOK_URL:} / ${CPQ_WEBHOOK_TOKEN:} from env — NOT a YAML
-    # connector_config block (which the SDK reserves for integration agents).
+    # CPQ push is a custom actuator inside the agent body: it reads the vault
+    # record 'cpq_webhook' with leafmesh.connection_rows (base URL + header /
+    # secret rows). No address or token in .env or in this file. Not notify:
+    # the push's reply sets cpq_pushed and the dev-store fallback.
     yields:
       quote_id: "string"
       artifact_path: "string"          # ./out/<quote_id>.pdf or .md — the real artifact
       artifact_kind: "string"          # pdf | markdown | none
       issued: "boolean"                # FORCED by the @chain fail-closed floor
       status: "string"                 # issued | issuance_blocked | no_deal_context
-      block_reasons: "list"            # why issuance was blocked (floor)
+      block_reasons: {type: array, items: string}   # why issuance was blocked (floor)
       approved: "boolean"
       approved_by: "string"            # which approver cleared the tier
       required_approver: "string"      # re-derived from the financials (floor basis)
@@ -422,7 +414,7 @@ agents:
   # billing_agent — AR & Collections Clerk (AI). The CASH side. One role, two
   # crafts loaded from the playbook on demand: `invoice` (raise an invoice from
   # an accepted quote) and `dun` (chase an overdue invoice on cadence).
-  # `instances: 3` fans the sweep across parallel copies; each calls the atomic
+  # `scaling.copies.count: 3` fans the sweep across parallel copies; each calls the atomic
   # claim_billing_work tool and gets a DISJOINT slice, so copies split the
   # backlog instead of all chasing the same invoices. @chain never duns a PAID
   # invoice (fail closed) and records verified actions. Backed by
@@ -435,12 +427,15 @@ agents:
     model: "gpt-4o-mini"
     temperature: 0.1
     max_tool_calls_per_message: 10   # claim + read across a backlog; default 5 truncates silently
-    description: "AR & Collections Clerk — invoices accepted quotes and duns the overdue backlog; instances fan-out with an atomic claim; a code floor never duns a paid invoice."
-    instances: 3                     # parallel copies per activation (backlog fan-out)
-    instances_handoff: last          # COMBINE the copies' results and route once
+    description: "AR & Collections Clerk — invoices accepted quotes and duns the overdue backlog; parallel copies fan out with an atomic claim; a code floor never duns a paid invoice."
+    scaling:                      # 2.4.484 (was instances / instances_handoff)
+      copies:
+        mode: fixed
+        count: 3                     # parallel copies per activation (backlog fan-out)
+        handoff: last          # COMBINE the copies' results and route once
     # Scheduled dunning sweep — daily, in the company's timezone (NOT UTC).
     # Also reachable via the dunning_sweep entry point. ONE cron line — with
-    # instances: 3 that is 3 copies per sweep (not 9); a list would multiply.
+    # copies.count: 3 that is 3 copies per sweep (not 9); a list would multiply.
     wake_up: "0 9 * * *"
     timezone: "Asia/Kolkata"
     wake_up_input:
@@ -467,8 +462,8 @@ agents:
       {"mode": "", "worked": [], "escalations": [], "dunned_count": 0, "invoiced_count": 0, "available": false, "summary": "", "claim_token": ""}
     yields:
       mode: "string"                 # invoice | dun
-      worked: "list"                 # invoice_ids this worker verified + acted on
-      escalations: "list"            # invoice_ids needing the RevOps Lead (list -> concatenates on merge)
+      worked: {type: array, items: string}        # invoice_ids this worker verified + acted on
+      escalations: {type: array, items: string}   # invoice_ids needing the RevOps Lead (list -> concatenates on merge)
       dunned_count: "number"
       invoiced_count: "number"
       available: "boolean"           # honest dev-store availability
@@ -499,12 +494,13 @@ agents:
              stage goes to the RevOps Lead — put it in "escalations".
     tools: [read_open_invoices, claim_billing_work]
     tool_categories: [billing]
-    # ── To wire a real billing/AR system, uncomment and set the URL (the SDK
-    #    rejects an empty-url http mcp at load, so this ships COMMENTED). ──
+    # ── To wire a real billing/AR system: create the vault connection
+    #    'billing_mcp' on Infrastructure → Integrations → MCP (URL + token live
+    #    there), then uncomment — here before the first start, in Studio's YAML
+    #    editor after it (applies live, no restart). ──
     # mcp:
-    #   - transport: http
-    #     url: "${BILLING_MCP_URL}"
-    #     token: "${BILLING_MCP_TOKEN:}"
+    #   - connection: billing_mcp   # vault connection holds the URL + token
+    #     transport: http
     #     use: [read_open_invoices, raise_invoice, record_payment]
     #     name: billing
     #     timeout: 30
@@ -515,8 +511,13 @@ agents:
         condition: "calling_agent_response.worked != []"
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Human members — first-class, reached in the channel they already live in.
-  # Every gate DEFAULT-DENIES on timeout (fallback -> held_for_review -> audit).
+  # Human members — first-class, answering in Studio's Inbox.
+  # Nothing is approved or issued on silence. If nobody answers within the
+  # seat's human_timeout_seconds, the request waits no longer: its Inbox card
+  # closes and the ticket records that no reply came. Nobody is chased
+  # automatically. fallback_on_timeout / fallback_response below declare the
+  # intent (held_for_review -> audit); on leafmesh 2.4.486 a dual seat's
+  # timeout does not route it yet.
   # `dual` belongs on the human/webhook boundary agent only; downstream peers
   # are `chain` (a dual->dual can_call is unbounded ping-pong, nuance #17).
   # ─────────────────────────────────────────────────────────────────────────
@@ -524,122 +525,100 @@ agents:
   sales_rep_human:
     name: "sales_rep_human"
     agent_type: "human"
-    human_interface: "webhook"
+    human_interface: "default"   # the Inbox (no vault connection needed)
     communication_type: "dual"
-    human_timeout_seconds: 3600      # 1 hour to approve / rework a small deal
+    human_timeout_seconds: 14400     # 4 working hours to self-approve a small deal or fix an incomplete RFQ
     description: "Sales Rep — self-approves small healthy deals; reworks incomplete RFQs."
     fallback_on_timeout: true
     fallback_response:
       human_decision: held
       human_message: held_for_review
-    webhook_config:
-      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
-      outbound_headers: {Content-Type: "application/json"}
-      outbound_timeout: 30
-      max_retries: 1
-      retry_delay: 2
     yields:
-      human_message: "string"        # approve | reject | resubmit | held_for_review
+      human_message: "string"        # approve | reject | resubmit | hold | held_for_review
     inputs:
       rfq_id: "string"
     can_call:
       - agent: "drafter_agent"
-        condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'Approved'"
+        condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'approved' or calling_agent_response.human_message == 'Approved'"
       - agent: "cass_shaper_agent"
         condition: "calling_agent_response.human_message == 'resubmit'"
       - agent: "qtc_audit_logger_agent"
-        condition: "calling_agent_response.human_message == 'reject' or calling_agent_response.human_message == 'held_for_review'"
+        condition: "calling_agent_response.human_message == 'reject' or calling_agent_response.human_message == 'rejected' or calling_agent_response.human_message == 'hold' or calling_agent_response.human_message == 'held_for_review'"
 
   deal_desk_human:
     name: "deal_desk_human"
     agent_type: "human"
-    human_interface: "webhook"
+    human_interface: "default"   # the Inbox (no vault connection needed)
     communication_type: "dual"
-    human_timeout_seconds: 14400     # 4 hours
-    description: "Deal Desk — discounted + competitive deals."
+    human_timeout_seconds: 14400     # 4 working hours — the deal desk's same-day turnaround
+    description: "Deal Desk — discounted + competitive deals (>10% off or >$25K list, up to 20% / $100K)."
     fallback_on_timeout: true
     fallback_response:
       human_decision: held
       human_message: held_for_review
-    webhook_config:
-      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
-      outbound_headers: {Content-Type: "application/json"}
-      outbound_timeout: 30
     yields:
-      human_message: "string"        # approve | reject | held_for_review
+      human_message: "string"        # approve | reject | hold | held_for_review
     inputs:
       rfq_id: "string"
     can_call:
       - agent: "drafter_agent"
-        condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'Approved'"
+        condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'approved' or calling_agent_response.human_message == 'Approved'"
       - agent: "qtc_audit_logger_agent"
-        condition: "calling_agent_response.human_message == 'reject' or calling_agent_response.human_message == 'held_for_review'"
+        condition: "calling_agent_response.human_message == 'reject' or calling_agent_response.human_message == 'rejected' or calling_agent_response.human_message == 'hold' or calling_agent_response.human_message == 'held_for_review'"
 
   finance_approver_human:
     name: "finance_approver_human"
     agent_type: "human"
-    human_interface: "webhook"
+    human_interface: "default"   # the Inbox (no vault connection needed)
     communication_type: "dual"
-    human_timeout_seconds: 21600     # 6 hours
-    description: "Finance Approver — margin + large deals."
+    human_timeout_seconds: 28800     # 8 working hours — one business day
+    description: "Finance Approver — large or deep-discount deals (>20% off or >$100K list, up to 30% / $1M)."
     fallback_on_timeout: true
     fallback_response:
       human_decision: held
       human_message: held_for_review
-    webhook_config:
-      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
-      outbound_headers: {Content-Type: "application/json"}
-      outbound_timeout: 30
     yields:
-      human_message: "string"        # approve | reject | held_for_review
+      human_message: "string"        # approve | reject | hold | held_for_review
     inputs:
       rfq_id: "string"
     can_call:
       - agent: "drafter_agent"
-        condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'Approved'"
+        condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'approved' or calling_agent_response.human_message == 'Approved'"
       - agent: "qtc_audit_logger_agent"
-        condition: "calling_agent_response.human_message == 'reject' or calling_agent_response.human_message == 'held_for_review'"
+        condition: "calling_agent_response.human_message == 'reject' or calling_agent_response.human_message == 'rejected' or calling_agent_response.human_message == 'hold' or calling_agent_response.human_message == 'held_for_review'"
 
   cfo_human:
     name: "cfo_human"
     agent_type: "human"
-    human_interface: "webhook"
+    human_interface: "default"   # the Inbox (no vault connection needed)
     communication_type: "dual"
-    human_timeout_seconds: 43200     # 12 hours
-    description: "CFO — top-tier authority (below-floor margin, deep discount, > $1M)."
+    human_timeout_seconds: 86400     # 24 hours — next business day
+    description: "CFO — top-tier authority (margin below 20%, discount over 30%, or list over $1M)."
     fallback_on_timeout: true
     fallback_response:
       human_decision: held
       human_message: held_for_review
-    webhook_config:
-      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
-      outbound_headers: {Content-Type: "application/json"}
-      outbound_timeout: 30
     yields:
-      human_message: "string"        # approve | reject | held_for_review
+      human_message: "string"        # approve | reject | hold | held_for_review
     inputs:
       rfq_id: "string"
     can_call:
       - agent: "drafter_agent"
-        condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'Approved'"
+        condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'approved' or calling_agent_response.human_message == 'Approved'"
       - agent: "qtc_audit_logger_agent"
-        condition: "calling_agent_response.human_message == 'reject' or calling_agent_response.human_message == 'held_for_review'"
+        condition: "calling_agent_response.human_message == 'reject' or calling_agent_response.human_message == 'rejected' or calling_agent_response.human_message == 'hold' or calling_agent_response.human_message == 'held_for_review'"
 
   revops_lead_human:
     name: "revops_lead_human"
     agent_type: "human"
-    human_interface: "webhook"
+    human_interface: "default"   # the Inbox (no vault connection needed)
     communication_type: "dual"
-    human_timeout_seconds: 43200     # 12 hours
-    description: "Accountable owner — resolves escalations, owns policy calls; the Manager escalates here. Everything that leaves the pod."
+    human_timeout_seconds: 86400     # 24 hours
+    description: "Accountable owner — resolves escalations (an RFQ still incomplete after rework, a severely overdue account); the Manager escalates errors here."
     fallback_on_timeout: true
     fallback_response:
       human_decision: held
       human_message: held_for_review
-    webhook_config:
-      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
-      outbound_headers: {Content-Type: "application/json"}
-      outbound_timeout: 30
     yields:
       human_message: "string"        # resolved | held_for_review
     inputs:
@@ -656,7 +635,7 @@ agents:
     name: "qtc_audit_logger_agent"
     agent_type: "external"
     framework: "custom"
-    communication_type: "execute"
+    communication_type: "chain"
     description: "WORM audit — hash-chains every decision, approval, issuance, held gate, and dunning action. Terminus."
     connector_config:
       sink_type: "local_file"

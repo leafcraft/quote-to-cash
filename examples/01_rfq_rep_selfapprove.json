@@ -5,7 +5,7 @@
     "rfq_id": "RFQ-2026-1144",
     "customer_id": "ACME-4471",
     "segment": "mid_market",
-    "target_close": "2026-09-15",
+    "target_close": "2026-11-30",
     "line_items": [
       {"sku": "PRO-SEAT", "qty": 10, "list_price_cents": 120000}
     ]

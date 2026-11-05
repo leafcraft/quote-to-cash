@@ -11,6 +11,7 @@ entry_points:
 
 agents:
   router_agent:
+    name: "router_agent"
     agent_type: "llm"
     model: "gpt-4o-mini"
     prompt: |
@@ -27,6 +28,7 @@ agents:
         condition: "intent == 'general'"
 
   billing_agent:
+    name: "billing_agent"
     agent_type: "llm"
     model: "gpt-4o"
     prompt: "You are a billing specialist. Help resolve billing inquiries."
@@ -34,6 +36,7 @@ agents:
     tool_categories: ["data"]
 
   technical_agent:
+    name: "technical_agent"
     agent_type: "llm"
     model: "gpt-4o"
     prompt: "You are a technical support specialist."
@@ -41,6 +44,7 @@ agents:
     memory: true
 
   general_agent:
+    name: "general_agent"
     agent_type: "llm"
     model: "gpt-4o-mini"
     prompt: "You are a friendly general support agent."
@@ -76,6 +80,7 @@ entry_points:
 
 agents:
   coordinator_agent:
+    name: "coordinator_agent"
     agent_type: "llm"
     model: "gpt-4o-mini"
     prompt: "Break down the research query into sub-questions."
@@ -85,22 +90,26 @@ agents:
       - {agent: "domain_expert"}
 
   web_researcher:
+    name: "web_researcher"
     agent_type: "llm"
     model: "gpt-4o"
     prompt: "Research the web for relevant information on the topic."
     tools: ["web_search"]
-    parallel: true
+    scaling:
+      runs: {max: 5}           # at most 5 research jobs at once across ALL pods (2.4.484; was parallel/max_concurrent)
 
   data_analyst:
-    agent_type: "programmatic"
-    parallel: true
+    name: "data_analyst"
+    agent_type: "programmatic"   # no flag needed to take several jobs at once
 
   domain_expert:
+    name: "domain_expert"
     agent_type: "llm"
     model: "claude-sonnet-4-6"
     prompt: "Provide domain expertise and analysis."
 
   synthesizer_agent:
+    name: "synthesizer_agent"
     agent_type: "llm"
     model: "gpt-4o"
     prompt: "Synthesize all research findings into a coherent report."
@@ -156,11 +165,10 @@ agents:
     agent_type: "human"
     human_interface: "webhook"          # required to actually use webhook_config below
     communication_type: "dual"
-    human_timeout_seconds: 300
+    human_timeout_seconds: 28800      # 8h — a PERSON answers this. 300 = five minutes.
     webhook_config:
-      outbound_url: "http://127.0.0.1:9999/human-notify"
-      outbound_headers:
-        Content-Type: "application/json"
+      connection: "client-hook"   # "Add custom" record, service type 'Outbound webhook' (base URL + header rows);
+                                  # inline outbound_url/outbound_headers fail to load since 2.4.481
       outbound_timeout: 30
       # inbound_endpoint is auto-derived from entry_points — no need to set it
       max_retries: 1
@@ -172,6 +180,7 @@ agents:
         condition: "calling_agent_response.from_agent == 'greeter_agent'"
 
   greeter_agent:
+    name: "greeter_agent"
     agent_type: "llm"
     model: "gpt-4o-mini"
     communication_type: "dual"
@@ -179,6 +188,7 @@ agents:
       - agent: "client"    # Routes to human for review
 
   processor_agent:
+    name: "processor_agent"
     agent_type: "programmatic"
     can_call:
       - agent: "researcher_agent"
@@ -235,12 +245,14 @@ curl -X POST http://127.0.0.1:18820/webhook/greet_user \
 ```yaml
 agents:
   daily_report_agent:
+    name: "daily_report_agent"
     agent_type: "programmatic"
     wake_up: "0 9 * * *"           # Every day at 9 AM
     timezone: "Asia/Kolkata"       # …9 AM IST. Omit timezone and this fires at 9 AM UTC (2.4.124+)
-    communication_type: "execute"   # Fire-and-forget
+    communication_type: "chain"     # a woken job has no caller to answer
 
   hourly_monitor_agent:
+    name: "hourly_monitor_agent"
     agent_type: "llm"
     model: "gpt-4o-mini"
     prompt: "Analyze system metrics and flag anomalies."
@@ -268,6 +280,7 @@ async def daily_report_agent(llm_response, input_data, context):
 ```yaml
 agents:
   triage_agent:
+    name: "triage_agent"
     agent_type: "llm"
     model: "gpt-4o-mini"           # Cheap, fast triage
     optimization_strategy: "speed"
@@ -281,16 +294,19 @@ agents:
         condition: "complexity == 'moderate'"
 
   simple_handler:
+    name: "simple_handler"
     agent_type: "llm"
     model: "gpt-4o-mini"           # Cheap for simple queries
     optimization_strategy: "cost"
 
   moderate_handler:
+    name: "moderate_handler"
     agent_type: "llm"
     model: "gpt-4o"                # Balanced
     optimization_strategy: "cost"
 
   complex_handler:
+    name: "complex_handler"
     agent_type: "llm"
     model: "claude-sonnet-4-6"   # Best quality for hard tasks
     optimization_strategy: "performance"
@@ -303,46 +319,93 @@ agents:
 ## Pattern 6: External Framework Integration
 
 ### CrewAI (connector-only, no Python needed)
+
+2.4.486: set the crew up once on Studio's **External agents page** (its CrewAI
+vault record — since 2.4.491 the record makes it a CrewAI agent, so name no
+framework — plus `poll_interval` / `max_poll_seconds`) and pick it:
+
 ```yaml
 agents:
   crewai_research:
+    name: "crewai_research"
     agent_type: "external"
-    framework: "crewai"
-    connector_config:
-      endpoint: "http://localhost:9000"
-      api_key: "${CREWAI_API_KEY}"              # Bearer Token
-      # user_api_key: "${CREWAI_USER_API_KEY}"  # User Bearer Token (preferred over api_key)
-      poll_interval: 2.0
-      max_poll_seconds: 300
+    external_agent: "research_crew"             # the entry on the External agents page
     can_call:
       - agent: "internal_processor"
     yields: {result: object}
     inputs: {task: string}
 ```
 
+The older shape still loads and runs (and is what you write before the page
+has an entry):
+
+```yaml
+  crewai_research:
+    name: "crewai_research"
+    agent_type: "external"
+    framework: "crewai"
+    connector_config:
+      connection: "crewai"                      # Infrastructure → External agents → CrewAI: endpoint + api_key (vault-only, 2.4.482)
+      poll_interval: 2.0
+      max_poll_seconds: 300
+```
+
+### Your own agent behind an HTTP API (`custom_api`, 2.4.486)
+```yaml
+  pricing_bot:
+    name: "pricing_bot"
+    agent_type: "external"
+    framework: "custom_api"                     # normally an External agents page entry ("Custom: API"; 2.4.491: POST /api/external-agents/from-spec reads its swagger file)
+    connector_config:
+      connection: "pricing-api"                 # "Add custom" record, service type 'External agent': base URL + header rows
+      method: "POST"
+      path: "/v1/quote"
+      query: {format: "json"}                   # fixed values, sent on every call
+      answer_path: "data.answer"                # the reply field that becomes the output
+    inputs: {sku: string, quantity: number}     # the body IS the agent's input (request_form is refused here)
+```
+
 ### Programmatic + Connector (connector-only, no Python needed)
 ```yaml
 agents:
   zapier_sheets:
+    name: "zapier_sheets"
     agent_type: "programmatic"
     integration: "zapier"
     connector_config:
-      connection: "google_sheets"
+      connection: "google_sheets"         # Zapier app slug — NOT the vault record
       action: "create_spreadsheet_row"
-      api_key: "${ZAPIER_API_KEY}"
+      vault_connection: "zapier-main"     # vault record holding the Zapier MCP key
     yields: {status: string}
     inputs: {row_data: object}
 
-  n8n_workflow:
+  order_sync_n8n:                         # not named n8n_workflow: that was a generic tool, removed in 2.4.485
+    name: "order_sync_n8n"
     agent_type: "programmatic"
     integration: "n8n"
     connector_config:
-      webhook_url: "http://localhost:5678/webhook/my-workflow"
+      connection: "n8n-workflow"          # Integrations → n8n: the webhook URL (vault-only, 2.4.482)
+      # account: "ops"                    # 2.4.486 alternative: an n8n account on the Tools page (it picks the record)
       mode: "callback"
       callback_timeout: 120
     yields: {result: object}
     inputs: {data: object}
 ```
+
+### Post an agent's output to your system when it finishes (`notify`, 2.4.485)
+```yaml
+  invoice_matcher:
+    name: "invoice_matcher"
+    agent_type: "llm"
+    model: "gpt-4o-mini"
+    notify:
+      webhook: "erp_inbox"                # a webhook on Tools → Webhooks (it picks an Outbound webhook record)
+      when: "both"                        # done (default) | failed | both
+```
+
+The body is the agent's output; headers `X-LeafMesh-Agent`, `X-LeafMesh-Session`,
+`X-LeafMesh-Execution`, `X-LeafMesh-Status`. The mesh sends it in the background
+and retries; it never fails the run.
 
 The connector response is returned as-is. To post-process it, define a **shaper**
 function and register it as the agent's *intelligence*. `intelligence` takes the
@@ -366,7 +429,7 @@ async def zapier_sheets(connector_response, input_data, context):
 from leafmesh import LeafMesh
 from agency.zapier_sheets_agent import zapier_sheets
 
-sdk = LeafMesh.from_yaml("configs/config.yaml")
+sdk = LeafMesh.from_yaml("configs/config.yaml")   # first-boot seed; later boots run the store's version
 sdk.intelligence("zapier_sheets")(zapier_sheets)   # "zapier_sheets" = the YAML agent key
 ```
 
@@ -377,7 +440,7 @@ from leafmesh import pre_compose, zapier
 @pre_compose(
     context_processor=zapier(
         action="slack_send_message",
-        api_key="${ZAPIER_NLA_API_KEY}",
+        connection="zapier-main",         # the vault record (2.4.485); api_key=/mcp_key= in code is refused
     )
 )
 async def notification_agent(llm_response, input_data, context):
@@ -393,6 +456,7 @@ async def notification_agent(llm_response, input_data, context):
 ```yaml
 agents:
   advisor_agent:
+    name: "advisor_agent"
     agent_type: "llm"
     model: "gpt-4o"
     prompt: |
@@ -488,8 +552,7 @@ async def fetch_weather(city: str) -> dict:
     description="Run a read-only database query",
     category="data",
     allowed_agents=["analyst_agent", "report_agent"],
-    requires_confirmation=True,
-    timeout_seconds=30,
+    timeout_seconds=30,   # no confirmation switch: a person's sign-off is a human agent before the caller
 )
 async def db_query(sql: str) -> dict:
     # Validate read-only
@@ -497,7 +560,23 @@ async def db_query(sql: str) -> dict:
         return {"error": "Only SELECT queries allowed"}
     # Execute query...
     return {"rows": [], "count": 0}
+
+RATE_CARD = {"0-1kg": 4.50, "1-5kg": 9.00, "5-20kg": 18.00}
+
+@global_tool(
+    name="shipping_rate_card",
+    description="Shipping price for a weight band, from the published rate card",
+    category="data",
+    changes_nothing=True,   # 2.4.491: a pure lookup whose answer never depends on WHEN it ran
+)
+def shipping_rate_card(weight_band: str) -> dict:
+    return {"band": weight_band, "price_eur": RATE_CARD.get(weight_band)}
 ```
+
+`changes_nothing=True` lets a turn that used only such tools be replayed from
+the response cache without running them. `shipping_rate_card` qualifies (a
+static table). `fetch_weather` and `db_query` do **not**: they read live data,
+and a replay would hand back a stale answer — leave them unmarked.
 
 ---
 
@@ -521,7 +600,7 @@ async def my_agent(llm_response, input_data, context):
 
 ## Pattern 10: Super-Agent for Complex Multi-Step Tasks (v2.3.x)
 
-Use Super-Agent when the task genuinely has multi-step structure and you want per-step verification + retry-once + cost ceiling + cancellation without writing the orchestration glue yourself.
+Use Super-Agent when the task genuinely has multi-step structure and you want per-step verification + retry (one retry by default; `tries` tunes it, 2.4.491) + cost ceiling + cancellation without writing the orchestration glue yourself.
 
 ### config.yaml
 
@@ -531,6 +610,7 @@ architecture: "managed_mesh"
 
 agents:
   research_synthesiser:
+    name: "research_synthesiser"
     agent_type: "llm"
     model: "claude-sonnet-4-6"
 
@@ -541,6 +621,7 @@ agents:
       synth_max_tokens: 32768     # cap on the final synthesis call
       goal_check_view_chars: 12000  # chars the goal-check phase sees (default 12000)
       step_concurrency: 4         # parallel plan steps when the DAG allows
+      tries: {mode: auto, count: 3, rounds: 2}  # 2.4.491: 3 attempts at once only after a failed check
     # super_agent: true = on with all defaults. The flat super_agent_* keys were
     # never wired, and LEAFMESH_SUPER_AGENT_* env vars are dead as of 2.4.131.
 
@@ -594,7 +675,7 @@ curl -X POST http://127.0.0.1:18820/api/skills/sources \
 1. User submits a research question via `mesh_call("research_inbox", input={"question": "..."})`
 2. **plan** phase: LLM produces a structured 5-7 step plan, persisted to Redis (`leafmesh:plan:{session}:research_synthesiser:{run_id}`)
 3. **execute** phase: LLM runs each step in sequence; per-step output written to scratchpad
-4. **verify** phase: LLM checks each step's output against the step's `expected_outcome`. On soft-failure → retry-once with failure context. On hard failure → reflect.
+4. **verify** phase: LLM checks each step's output against the step's `expected_outcome`. On soft-failure → retry-once with failure context (`tries` changes the attempts and rounds, 2.4.491). On hard failure → reflect.
 5. **reflect** phase: LLM reads plan + scratchpad and proposes a plan amendment (bounded by `reflection_budget`)
 6. **finalize** phase: LLM synthesises the final output, honours `yields`, respects `synth_max_tokens_*` bounds
 7. Output flows through `can_call` — fact-checker if low confidence, human expert if flagged
@@ -633,6 +714,7 @@ architecture: "managed_mesh"
 
 agents:
   support_agent:
+    name: "support_agent"
     agent_type: "llm"
     model: "gpt-4o-mini"
     prompt: |
@@ -761,6 +843,7 @@ in the loop on every lap. Bound it with a per-session exhaustion counter.
 ```yaml
 agents:
   intake_agent:
+    name: "intake_agent"
     agent_type: "llm"
     model: "gpt-4o-mini"
     yields: {po_number: string, line_items: list}
@@ -768,6 +851,7 @@ agents:
       - agent: "matching_agent"
 
   matching_agent:
+    name: "matching_agent"
     agent_type: "programmatic"
     yields:
       po_found: "boolean"
@@ -812,6 +896,50 @@ Checklist for ANY back-edge:
 
 ---
 
+## Pattern 13: Copies on a List (`scaling`, 2.4.484)
+
+One job carries a list; the agent should work the items side by side, and the
+next agent should get ONE combined result.
+
+### config.yaml
+```yaml
+agents:
+  invoice_matcher:
+    name: "invoice_matcher"
+    agent_type: "llm"
+    model: "gpt-4o-mini"
+    prompt: "Match the invoice you are given against its purchase order. When done, take the next one with next_work_item."
+    inputs: {invoices: array}
+    yields:
+      matched: {type: array, items: {type: object, fields: {invoice_id: string, po_id: string}}}
+      matched_count: number
+    scaling:
+      runs:
+        max: 2              # at most 2 batches at once across ALL pods
+      copies:
+        mode: auto          # the mesh hands out `invoices` item by item
+        max: 8              # 6 invoices -> 6 copies; 30 invoices -> 8 copies working through them
+        work: invoices      # each copy's `invoices` holds just its one item
+        handoff: last       # one combined output: `matched` lists joined, `matched_count` summed
+    can_call:
+      - agent: "ledger_poster"
+        condition: "calling_agent_response.matched_count > 0"
+```
+
+### What happens at runtime
+- Each copy's input carries `_instance: {id, of: "auto"}` and
+  `_work: {item, field: "invoices", tool: null}`; it asks for more with the
+  built-in `next_work_item` tool (`{item}` or `{done: true}`).
+- `ledger_poster` is called **once**, with the combined result plus
+  `_instances: {count, results, failed}`.
+- Work the agent finds itself (a backlog, a queue) → `claim_tool: <its own
+  tool>` instead of `work:` — never both. A `mode: fixed` copy gets the whole
+  job (`count: 3` → three copies of the same input).
+- Writing `instances`, `max_concurrent` or `parallel` instead is refused at
+  load with these lines to write.
+
+---
+
 ## Docker Deployment
 
 ```yaml
@@ -820,17 +948,28 @@ services:
   redis:
     image: redis:7-alpine
     ports: ["6379:6379"]
+    volumes: ["redis-data:/data"]   # the agency's configuration lives in the store (2.4.481) — keep it
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
 
   app:
     build: .
     ports: ["18820:18820"]
-    env_file: .env
+    env_file: .env              # the datastore is set here (REDIS_HOST=redis, …) — never in config.yaml (2.4.482)
     depends_on:
       redis:
         condition: service_healthy
+
+volumes:
+  redis-data: {}
 ```
+
+`configs/config.yaml` is copied into the image only as the **first-boot
+seed**: on an empty store it is imported as version 1; after that the store's
+latest version runs and edits to the file are not applied (boot says so).
+Change a running agency in Studio or with `PUT /api/yaml/raw`. Keep the store's
+data (the volume above): if it is lost, every saved version goes with it and the
+next boot imports the seed again as version 1.
 
 ```dockerfile
 # Dockerfile

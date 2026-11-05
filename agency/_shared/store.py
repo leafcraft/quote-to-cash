@@ -84,8 +84,8 @@ _RFQ_SEED: list[dict[str, Any]] = [
     {
         "rfq_id": "RFQ-2026-0042",
         "customer_id": "ACME-4471",
-        "received_at_utc": "2026-08-20T09:14:00Z",
-        "target_close": "2026-08-31",
+        "received_at_utc": "2026-10-28T09:14:00Z",
+        "target_close": "2026-11-20",
         "segment": "mid_market",
         "line_items": [
             {"sku": "PRO-SEAT", "qty": 40, "list_price_cents": 120000},
@@ -125,39 +125,48 @@ _DISCOUNT_POLICY_SEED: dict[str, Any] = {
     },
 }
 
-# Deal history — what the deal shaper reasons over (CRM).
+# Deal history — what the deal shaper reasons over (CRM). Customers and
+# competitors are fictional. Every invoice below traces to a WON deal here:
+# invoice amount = deal_size_cents x (1 - discount_pct).
 _DEAL_HISTORY_SEED: list[dict[str, Any]] = [
     {"customer_id": "ACME-4471", "rfq_id": "RFQ-2025-0188", "outcome": "won",
      "discount_pct": 0.10, "deal_size_cents": 5_200_000, "closed_at": "2025-07-02"},
     {"customer_id": "ACME-4471", "rfq_id": "RFQ-2024-0911", "outcome": "won",
      "discount_pct": 0.08, "deal_size_cents": 3_100_000, "closed_at": "2024-06-19"},
+    {"customer_id": "GLOBEX-2210", "rfq_id": "RFQ-2025-0372", "outcome": "won",
+     "discount_pct": 0.10, "deal_size_cents": 15_000_000, "closed_at": "2025-06-18"},
     {"customer_id": "GLOBEX-2210", "rfq_id": "RFQ-2025-0440", "outcome": "lost",
      "discount_pct": 0.25, "deal_size_cents": 18_000_000, "closed_at": "2025-09-30",
-     "lost_to": "Northstar"},
+     "lost_to": "Quillon"},
+    {"customer_id": "INITECH-9001", "rfq_id": "RFQ-2026-0011", "outcome": "won",
+     "discount_pct": 0.125, "deal_size_cents": 2_400_000, "closed_at": "2026-10-16"},
+    {"customer_id": "HOOLI-5567", "rfq_id": "RFQ-2025-0090", "outcome": "won",
+     "discount_pct": 0.025, "deal_size_cents": 8_000_000, "closed_at": "2025-04-28"},
 ]
 
 # Competitor pricing signals — from your price-intelligence stack.
 _COMPETITOR_SEED: list[dict[str, Any]] = [
-    {"sku": "PRO-SEAT", "competitor": "Northstar", "their_unit_cents": 99000,
+    {"sku": "PRO-SEAT", "competitor": "Quillon", "their_unit_cents": 99000,
      "observed_at": "2026-08-15", "note": "aggressive seat pricing in mid-market"},
-    {"sku": "ENT-SEAT", "competitor": "Vertex", "their_unit_cents": 240000,
+    {"sku": "ENT-SEAT", "competitor": "Corvane", "their_unit_cents": 240000,
      "observed_at": "2026-08-10", "note": "premium positioning"},
 ]
 
-# Open invoices — the CASH side. Two are already overdue so the dunning
-# sweep has real work to fan out across billing instances on day 0.
+# Open invoices — the CASH side (Net 30 from issue). Two are already overdue
+# so the dunning sweep has real work to fan out across billing copies on
+# day 0; one is open (not yet due); one is paid (must never be dunned).
 _INVOICE_SEED: list[dict[str, Any]] = [
     {"invoice_id": "INV-2026-0301", "quote_id": "Q-RFQ-2025-0188",
      "customer_id": "ACME-4471", "amount_cents": 4_680_000,
      "issued_at": "2026-07-05", "due_date": "2026-08-04",
      "status": "overdue", "dunning_stage": 1, "claimed_by": ""},
-    {"invoice_id": "INV-2026-0288", "quote_id": "Q-RFQ-2025-0440",
+    {"invoice_id": "INV-2026-0288", "quote_id": "Q-RFQ-2025-0372",
      "customer_id": "GLOBEX-2210", "amount_cents": 13_500_000,
      "issued_at": "2026-06-20", "due_date": "2026-07-20",
      "status": "overdue", "dunning_stage": 2, "claimed_by": ""},
     {"invoice_id": "INV-2026-0312", "quote_id": "Q-RFQ-2026-0011",
      "customer_id": "INITECH-9001", "amount_cents": 2_100_000,
-     "issued_at": "2026-08-10", "due_date": "2026-09-09",
+     "issued_at": "2026-10-20", "due_date": "2026-11-19",
      "status": "open", "dunning_stage": 0, "claimed_by": ""},
     {"invoice_id": "INV-2026-0260", "quote_id": "Q-RFQ-2025-0090",
      "customer_id": "HOOLI-5567", "amount_cents": 7_800_000,
@@ -297,7 +306,7 @@ def mark_invoice(invoice_id: str, **fields: Any) -> dict[str, Any]:
 def claim_billing_work(kind: str, count: int, claim_token: str) -> list[dict[str, Any]]:
     """Atomically claim up to `count` disjoint billing items for one worker.
 
-    Fan-out primitive for `instances: N` on billing_agent: each parallel
+    Fan-out primitive for `scaling.copies.count: N` on billing_agent: each parallel
     copy calls this under the shared lock and receives a DISJOINT slice, so
     N copies split a backlog instead of all dunning the same invoices. For
     a single-item trigger (one accepted quote to invoice) exactly one copy

@@ -15,7 +15,7 @@
 > **stores = `session_stash` / Redis / the domain store / the customer's system of record.**
 >
 > **Calibrate to your risk surface.** This doctrine was hardened by a user-facing
-> assistant that touches a person's phone — so it is unusually paranoid about
+> assistant that acts on a phone — so it is unusually paranoid about
 > fabrication and about actuating. Take the *reasoning*, not the rules verbatim: a
 > batch pipeline with no human reading the output has different economics, and some
 > of §A5 (truth protocols) is overkill there. The reasoning is what transfers; the
@@ -47,8 +47,13 @@ What follows from it:
   down what happened" is a *step inside* other roles. In LeafMesh it is a function
   call (`sdk.intelligence(name)(fn)` → the WORM sink) invoked from every agent
   that does something, **not** a standalone agent per writer. Conversely, never
-  merge a control (approval gate, reviewer, actuator, audit) into a role — see
+  merge a control (approval step, reviewer, actuator, audit) into a role — see
   [Rule 2's "never merged" list](SKILL.md#rule-2--one-role-multiple-responsibilities-the-hiring-test).
+- **Write the one sentence into `description`.** Since 2.4.487 the agent you
+  hand work to is told who sent it — your name, your `description`, and for a
+  person's seat whom it `represents`. A blank or vague description leaves the
+  receiver guessing whether it is answering the customer, a colleague or
+  another agent.
 
 ### A2. The four stages — and what belongs in each
 
@@ -171,6 +176,12 @@ result told the user which briefing they got.**
   wanted a day AND notifications from two readers paid twice and, on a background
   pass, got **two answers from two different moments with nothing saying so**.
   Collapse N ways to read one thing into one.
+- **`changes_nothing` is a promise about time, not just about writes**
+  (2.4.491). A tool marked `changes_nothing=True` may be skipped on a replay
+  from the response cache. Mark only lookups whose answer never depends on
+  when they ran (a rate card, a policy table). A read of live data — an
+  invoice's status, stock, a queue to claim from — stays unmarked, or the
+  replay hands back yesterday's answer as today's.
 
 ### A5. Truth protocols — never say something about a person's life that isn't so
 
@@ -344,7 +355,10 @@ acting *and* deciding, you've collapsed a control — split it.
   unconditional edge is a smell that two roles should be one.
 - **HITL gates default-deny.** `fallback_on_timeout: true` + a `fallback_response`
   that resolves to a **non-approving** verdict (`held_for_review`) routed to the
-  audit sink. **Silence never advances anything.**
+  audit sink. **Silence never advances anything.** Without a fallback, since
+  2.4.486 the seat simply stops waiting when its time is up — no escalation, no
+  check-back — so decide on purpose what an unanswered gate does (SKILL.md →
+  When nobody answers).
 - **Bounded back-edges.** Re-extract / rejection loops count their rounds *in the
   mesh* (exhaustion counter → terminal route — [Rule 3](SKILL.md#rule-3--bound-every-retry-back-edge)).
   Back-edges *through a human* are the worst offenders — bound them first.
@@ -409,20 +423,23 @@ accept and negotiate an intent is the rare exception that joins as a member.)
   coordinator + specialists + finisher.
 - **Humans = members** reached in their channel (inbox / Teams / Slack / Box).
 - **Systems = tool-chips** inside the agents that operate them.
-- **Controls stay separate**: approval gates, the finisher, the WORM sink.
+- **Controls stay separate**: approval steps, the finisher, the WORM sink.
 
 ### C4. Pick a connector per system
 
 | The user has… | Wire it as |
 |---|---|
-| Outlook / Gmail / mailbox | native email channel (SMTP/IMAP) or Graph/MCP connector |
+| Outlook / Gmail / mailbox | native email channel (SMTP out, provider webhook in) — or the **IMAP broker** when there is no public URL — or a Graph/MCP connector |
 | Slack / Teams / WhatsApp / Telegram | native `channels:` adapter on the human agent |
 | A SaaS with an API (CRM/ERP/WMS, Box, Jira, SharePoint) | `integration: mcp` / `n8n` connector agent, shaped by `@sdk.intelligence` |
-| A webhook-only system | `programmatic` agent + `connector_config.webhook_url` (n8n), or `/callback/{agent}` |
+| A webhook-only system | `programmatic` agent + `integration: n8n` with `connector_config.connection` (the n8n record holds the webhook URL), or `/callback/{agent}`. To send an agent's output there when it finishes: `notify:` + a Tools → Webhooks webhook (2.4.485/486) |
+| An HTTP API with an OpenAPI / Swagger file | `api_tools: [entry]` on the LLM agent (uploaded on the Tools page; fixed query values set there, 2.4.486) |
 | Nothing yet for this step | ship the **dev-store stub** (`./data`) that **announces itself** ([A4](#a4-tools--the-model-acts-code-does-not-act-afterwards)), inert until the real URL is set ([A8](#a8-shipping-across-a-boundary-you-do-not-control)) |
 
-Every connector uses `${VAR:}` empty-defaults and is **inert until wired** —
-never a synthetic success in the meantime.
+Every connector picks its vault record with `connection:` (addresses and keys
+are vault-only; connector env variables are not read since 2.4.485) and is
+**inert until wired** — a record that does not exist yet switches the agent off
+until it is created — never a synthetic success in the meantime.
 
 ### C5. "I don't have any backend" → provision one (Supabase, or the right fit)
 
@@ -431,10 +448,24 @@ A LeafMesh mesh needs two kinds of persistence. Map the user's answer:
 1. **Session / working state** — `session_stash` (in-process) and **Redis** ship
    with the SDK. **Always present**, no provisioning needed. This is where retry
    counters, per-session state, and the HITL-recovery ladder live.
-2. **System of record** — durable relational data + files + (optionally) auth.
-   **If the user has none, provision it.** Default recommendation: **Supabase**
-   (hosted Postgres + Storage + Auth + PostgREST + Realtime), because it gives all
-   three in one, with an auto REST API you can wire without writing a backend.
+2. **System of record** — durable relational data + files.
+
+   > **Start from: the pod keeps NO database of its own.** The customer already
+   > has systems of record — the CRM/tenant they are configuring, their
+   > documentation tool, their task tracker, their PSA. The pod's store should
+   > be a **facade over those**, reading and writing where the business already
+   > keeps the fact. A pod that stands up its own database immediately owns a
+   > second copy of the truth, and now something has to reconcile them.
+   >
+   > This was a real correction on a real build: *"why would it have its own
+   > DB, rely on the system of record."* The section below used to recommend
+   > provisioning one by default, and that is how the mistake got made.
+
+   Provision a backend only when the customer genuinely has nowhere for a fact
+   to live and the fact must outlive the session. Then **Supabase** is a
+   reasonable fit (hosted Postgres + Storage + Auth + PostgREST + Realtime,
+   with an auto REST API and no backend to write) — but say out loud which
+   facts are going there and why the customer's own systems could not hold them.
 
 **Supabase → LeafMesh mapping** (respecting [A6 "where data lives"](#a6-where-data-lives--find-the-facts-home-before-you-add-a-store)):
 

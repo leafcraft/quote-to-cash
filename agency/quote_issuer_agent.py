@@ -1,7 +1,7 @@
 """Programmatic Agent — quote ISSUER (artifact-producing executor).
 
 This is the actuator that FINISHES the job. The desk used to draft a quote
-and route it; now `quote_issuer_agent` runs AFTER the approval gate clears
+and route it; now `quote_issuer_agent` runs AFTER the approval step clears
 and quote_drafter has assembled the body, and it GENERATES + ISSUES the
 quote as a real artifact from the approved pricing/discount/validity:
 
@@ -9,19 +9,27 @@ quote as a real artifact from the approved pricing/discount/validity:
     validity date, terms — rendered to ./out/<quote_id>.pdf via ReportLab
     when available, else a deterministic .md/.txt file (always a real file
     on disk, day-0, no extra deps);
-  · AND/OR a CPQ PUSH via ${CPQ_WEBHOOK_URL:} (read from env — a custom
-    urllib actuator, not a YAML connector_config) — inert until the URL is
-    set; a dev-store fallback records the issued quote in
-    ./data/issued_quotes.json so the chain is observable out of the box.
+  · AND a CPQ PUSH to the vault record 'cpq_webhook' (an "Add custom"
+    record on Studio's Infrastructure page, service type 'Outbound webhook':
+    base URL = your CPQ's create-quote address, header rows for its auth,
+    secret rows for the token). Read with leafmesh.connection_rows — the
+    address and token never come from .env or the config. Until the record
+    exists the push is "not_configured" and a dev-store fallback records the
+    issued quote in ./data/issued_quotes.json, announcing itself.
+
+The push and the dev-store record happen ONLY after the approval checks
+below pass — an under-approved quote is never sent anywhere.
 
 It returns the artifact path/id + a summary.
 
 FAIL-CLOSED FLOOR (@chain enforce_issuance_floor): a quote is NEVER issued
 if the deal was not approved, or if its discount TIER was not cleared by
 the REQUIRED approver. The required approver is re-derived in code from the
-recovered financials (the same amount × margin × discount matrix the
-discount_policy wires encode), so the issuer cannot be tricked into issuing
-an under-approved deal even if an upstream marker is wrong. If the floor
+recovered financials (the same amount × margin × discount matrix Cass's
+wires encode). The approver who actually cleared it is the human seat the
+drafter recorded from the reply (`source_agent`); no seat on record = not
+cleared. So the issuer cannot be tricked into issuing an under-approved
+deal even if an upstream marker is wrong. If the floor
 trips, the artifact is suppressed and the result is marked blocked — the
 audit terminus still records the attempt.
 
@@ -29,17 +37,19 @@ auto_discover matches function name 'quote_issuer_agent' to YAML.
 """
 from __future__ import annotations
 
+import asyncio
 import json
-import os
 import random
 import string
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from leafmesh import LeafMeshLogger, chain
+from leafmesh import LeafMeshLogger, chain, connection_rows
+from leafmesh.vault.refs import UnresolvedVaultRef
 
 from agency._shared import store
 from agency._shared.session_stash import resolve_session_id, stash_get
@@ -48,6 +58,9 @@ logger = LeafMeshLogger(__name__)
 
 _OUT_DIR = Path("./out")
 _DEFAULT_VALIDITY_DAYS = 30
+# Vault record for the CPQ create-quote webhook (Infrastructure → Add custom →
+# 'Outbound webhook'). Its existence is what turns the push on.
+CPQ_CONNECTION = "cpq_webhook"
 
 # The approval matrix, re-derived in code (mirrors discount_policy_agent's
 # can_call conditions). Thresholds in cents: rep ≤ $25K < deal_desk ≤ $100K
@@ -289,22 +302,35 @@ def _render_text(quote: dict) -> str:
     return str(path)
 
 
-def _push_to_cpq(quote: dict, webhook_url: str, auth_token: str) -> dict[str, Any]:
-    """Push the issued quote to the CPQ via webhook. Inert (returns
-    cpq_pushed=False) when no URL is configured."""
-    if not webhook_url:
-        return {"cpq_pushed": False, "cpq_status": "not_configured"}
-    body = json.dumps(quote, default=str).encode("utf-8")
-    req = urllib.request.Request(webhook_url, data=body, method="POST",
-                                 headers={"Content-Type": "application/json"})
-    if auth_token:
-        req.add_header("Authorization", f"Bearer {auth_token}")
+def _post_json(url: str, body: dict, headers: dict) -> dict[str, Any]:
+    data = json.dumps(body, default=str).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST",
+                                 headers={"Content-Type": "application/json", **headers})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
             return {"cpq_pushed": True, "cpq_status": f"http_{resp.status}"}
     except (urllib.error.URLError, OSError) as e:
-        logger.warning(f"[quote-issuer] CPQ push failed: {e}")
-        return {"cpq_pushed": False, "cpq_status": f"error:{e}"}
+        logger.warning(f"[quote-issuer] CPQ push failed: {type(e).__name__}")
+        return {"cpq_pushed": False, "cpq_status": f"error:{type(e).__name__}"}
+
+
+async def _push_to_cpq(quote: dict) -> dict[str, Any]:
+    """Push the issued quote to the CPQ through the vault record
+    'cpq_webhook'. Not wired (no record) -> cpq_pushed=False, "not_configured"."""
+    try:
+        rows = await connection_rows(CPQ_CONNECTION)
+    except UnresolvedVaultRef:
+        return {"cpq_pushed": False, "cpq_status": "not_configured"}
+    except Exception as e:  # e.g. the record is not shared with this agent
+        logger.warning(f"[quote-issuer] vault record {CPQ_CONNECTION!r} unusable: {type(e).__name__}")
+        return {"cpq_pushed": False, "cpq_status": f"error:{type(e).__name__}"}
+    base_url = str(rows.get("base_url") or "").strip()
+    if not base_url:
+        return {"cpq_pushed": False, "cpq_status": "record_has_no_base_url"}
+    query = rows.get("query") or {}
+    url = base_url + (("&" if "?" in base_url else "?") + urllib.parse.urlencode(query) if query else "")
+    body = {**(rows.get("body") or {}), **quote}
+    return await asyncio.to_thread(_post_json, url, body, dict(rows.get("headers") or {}))
 
 
 def _record_dev_store(quote: dict) -> None:
@@ -322,6 +348,24 @@ def _record_dev_store(quote: dict) -> None:
 
 
 # ── @chain fail-closed issuance floor ────────────────────────────────
+_RANK = {"sales_rep_human": 1, "deal_desk_human": 2,
+         "finance_approver_human": 3, "cfo_human": 4}
+
+
+def _block_reasons(approved: bool, required: str, cleared: str) -> list[str]:
+    """Why this quote may not be issued ([] = it may). One rule, used before
+    the CPQ push and again by the @chain floor."""
+    reasons: list[str] = []
+    if not approved:
+        reasons.append("deal was not approved")
+    # Authority ordering: a higher tier clearing a lower-tier deal is fine.
+    if _RANK.get(cleared, 0) < _RANK.get(required, 99):
+        reasons.append(
+            f"discount tier requires {required or 'an approver'} but was "
+            f"cleared by {cleared or '∅'}")
+    return reasons
+
+
 def enforce_issuance_floor(result: dict, context: dict) -> dict:
     """Block any quote that wasn't approved or whose discount tier wasn't
     cleared by the REQUIRED approver. Fail-closed: on a trip we suppress
@@ -336,19 +380,7 @@ def enforce_issuance_floor(result: dict, context: dict) -> dict:
     required = result.get("required_approver", "")
     cleared = result.get("approved_by", "")
     approved = bool(result.get("approved"))
-
-    # Authority ordering: a higher tier clearing a lower-tier deal is fine.
-    rank = {"sales_rep_human": 1, "deal_desk_human": 2,
-            "finance_approver_human": 3, "cfo_human": 4}
-    cleared_ok = rank.get(cleared, 0) >= rank.get(required, 99)
-
-    reasons: list[str] = []
-    if not approved:
-        reasons.append("deal was not approved")
-    if not cleared_ok:
-        reasons.append(
-            f"discount tier requires {required or 'an approver'} but was "
-            f"cleared by {cleared or '∅'}")
+    reasons = _block_reasons(approved, required, cleared)
 
     if reasons:
         logger.error(f"[quote-issuer] ISSUANCE BLOCKED — {'; '.join(reasons)}")
@@ -432,12 +464,10 @@ async def quote_issuer_agent(llm_response: Any, input_data: Any,
     # Which approver MUST clear this (re-derived) and who actually did.
     required = _required_approver(total_list_cents or subtotal, gross_margin_pct, discount_pct)
     approved = _was_approved(input_data, context, stashed)
+    # Who cleared it: the human seat the drafter recorded from the reply
+    # (source_agent). No seat on record = not cleared (fail closed).
     approved_by = str(_lookup("approved_by", *sources) or "")
-    if not approved_by and approved:
-        # quote_drafter is only reachable on an approve route, so the
-        # required approver is the one who cleared it (the matrix is
-        # mutually exclusive — exactly one tier fires per deal).
-        approved_by = required
+    reasons = _block_reasons(approved, required, approved_by)
 
     issued_at = datetime.now(timezone.utc).isoformat()
     valid_until = _validity_date(validity_days)
@@ -462,22 +492,23 @@ async def quote_issuer_agent(llm_response: Any, input_data: Any,
         "quote_body": quote_body,
     }
 
-    # Render the artifact: PDF if ReportLab is present, else a real .md file.
-    artifact_path = _render_pdf(quote)
-    artifact_kind = "pdf"
-    if not artifact_path:
-        artifact_path = _render_text(quote)
-        artifact_kind = "markdown"
-    quote["artifact_path"] = artifact_path
-
-    # CPQ push (inert until ${CPQ_WEBHOOK_URL:} set) + dev-store fallback.
-    conn = context.get("connector_config") if isinstance(context, dict) else None
-    conn = conn if isinstance(conn, dict) else {}
-    webhook_url = str(conn.get("webhook_url") or os.environ.get("CPQ_WEBHOOK_URL", "")).strip()
-    auth_token = str(conn.get("auth_token") or os.environ.get("CPQ_WEBHOOK_TOKEN", "")).strip()
-    cpq = _push_to_cpq(quote, webhook_url, auth_token)
-    if not cpq.get("cpq_pushed"):
-        _record_dev_store(quote)
+    if reasons:
+        # Under-approved: render nothing, push nothing, record nothing. The
+        # floor marks it blocked and the audit sink records the attempt.
+        artifact_path, artifact_kind = "", "none"
+        cpq = {"cpq_pushed": False, "cpq_status": "not_sent_blocked"}
+    else:
+        # Render the artifact: PDF if ReportLab is present, else a real .md file.
+        artifact_path = _render_pdf(quote)
+        artifact_kind = "pdf"
+        if not artifact_path:
+            artifact_path = _render_text(quote)
+            artifact_kind = "markdown"
+        quote["artifact_path"] = artifact_path
+        # CPQ push through the vault record + dev-store fallback.
+        cpq = await _push_to_cpq(quote)
+        if not cpq.get("cpq_pushed"):
+            _record_dev_store(quote)
 
     summary = (
         f"Issued quote {quote_id} for {customer_id or 'customer'} "

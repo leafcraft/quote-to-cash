@@ -1,6 +1,6 @@
 {
   "_entry_point": "dunning_sweep",
-  "_description": "Scheduled/manual overdue sweep — billing fans out across instances; each copy atomically claims a DISJOINT batch of overdue invoices and duns it. Severely overdue accounts escalate to the RevOps Lead.",
+  "_description": "Scheduled/manual overdue sweep — billing fans out across its copies; each copy atomically claims a DISJOINT batch of overdue invoices and duns it. Severely overdue accounts escalate to the RevOps Lead.",
   "data": {
     "mode": "dun"
   }
