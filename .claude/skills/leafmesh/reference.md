@@ -5,8 +5,16 @@
 ```python
 from leafmesh import LeafMesh
 
-# Initialization
-sdk = LeafMesh.from_yaml("configs/config.yaml")   # From YAML file
+# Initialization — the configuration lives in the agency's STORE (2.4.481)
+sdk = LeafMesh.from_yaml("config.yaml")           # First boot on an empty store: the file is imported
+                                                   # as version 1. Later boots run the store's latest
+                                                   # version; the file is read only for the agency's name
+                                                   # and an edit to it is NOT applied (boot says so).
+sdk = LeafMesh.from_store()                        # No file: name from LEAFMESH_AGENCY_NAME, store from .env;
+                                                   # an empty store starts a blank agency (built in Studio).
+                                                   # What create-leafmesh projects use: they ship no file,
+                                                   # and `create-leafmesh --start` loads the team first
+                                                   # (`leafmesh config import --if-empty`).
 sdk = LeafMesh.from_dict(config_dict)              # From Python dict
 sdk = LeafMesh(config=LeafMeshConfig(...))          # Direct instantiation
 
@@ -69,10 +77,15 @@ posts, next_cursor = await sdk.get_agent_feed("agent_name", count=50, cursor="+"
 posts, next_cursor = await sdk.get_session_feed("session_id", count=50, cursor="+")
 
 # Custom LLM provider — use only for providers NOT already built in.
-# Built-in providers (v2.3.x): OpenAI, Anthropic, Google, DeepSeek, AWS Bedrock,
+# Built-in providers — PyPI 2.4.418 (customers today): 10 + any OpenAI-compatible
+# endpoint. Dev 2.4.434+: 27 — OpenAI, Anthropic, Google, DeepSeek, AWS Bedrock,
 # GCP Vertex, Azure Foundry, xAI Grok (XAI_API_KEY), Mistral (MISTRAL_API_KEY),
-# and local/self-hosted. You only need register_llm_provider for something
-# truly new (e.g. an internal model gateway).
+# local/self-hosted, and 17 chat-completions vendors — OpenRouter, Groq,
+# Cerebras, Moonshot Kimi, Alibaba Qwen, Z.AI GLM, MiniMax, Inception, Meta
+# Muse, Tencent Hunyuan, Xiaomi MiMo, StepFun, Upstage, Poolside, Reka, Arcee,
+# Cohere (env vars in the table at the end). Any OpenAI-compatible model is
+# also reachable via openrouter/<lab>/<model>. You only need
+# register_llm_provider for something truly new (e.g. an internal gateway).
 sdk.register_llm_provider(
     name="my_internal_gateway",
     provider_class=MyInternalGatewayProvider,
@@ -81,9 +94,11 @@ sdk.register_llm_provider(
 )
 
 # Self-healing — driven by YAML config, not Python API.
-# Set `manager.self_healing: true` in config.yaml. The SDK enables
-# monitoring automatically at sdk.start(). Agent health and recovery
-# activity are visible in Studio's Dashboard.
+# A TOP-LEVEL `self_healing:` block in config.yaml (not under manager:).
+# Watching + notifying is on by default; acting (restart / spawn a
+# backup) needs `self_healing: {actions_enabled: true}`. Monitoring starts
+# at sdk.start(); health and recovery activity show in Studio's Dashboard.
+# `manager.self_healing: true` loads but does nothing.
 
 # Evolution — operators kick off scoring runs from Studio's
 # Evolution tab. The optimizer is no longer in-process; nothing in
@@ -91,6 +106,16 @@ sdk.register_llm_provider(
 ```
 
 ## Full Config YAML Structure
+
+This is the shape of the agency's configuration document. Since 2.4.481 it
+lives in the store: a create-leafmesh project ships no configuration file
+(`create-leafmesh --start` loads the team with `leafmesh config import
+--if-empty`); a file given to `from_yaml` is imported once on the first boot.
+After that the document is changed in Studio (settings or the YAML editor) or
+with `PUT /api/yaml/raw` / `PATCH /api/yaml/config` (`"save_to_disk": true`) —
+each save is a new version, applied without a restart (only
+`evolution_api` host/port/enabled need one). A blank agency's document writes
+every setting with its default (agent-config-fields.md → Runtime Config Blocks).
 
 ```yaml
 # ── Top-level ──
@@ -101,41 +126,22 @@ environment: "development"      # development | production
 debug: false
 log_level: "INFO"               # DEBUG | INFO | WARNING | ERROR
 
-# ── Redis ──
-redis:
-  host: "localhost"
-  port: 6379
-  db: 0
-  password: null
-  decode_responses: true
-  auto_storage: true
-  default_ttl: 3600
-  session_ttl: 7200
-  cluster_mode: false
-  cluster_nodes: []
+# ── Datastore — NOT configured here (2.4.482) ──
+# Where the store is lives in .env ONLY (LEAFMESH_STORE, REDIS_*, POSTGRES_* —
+# see Environment Variables below). A `persistence:` or top-level `redis:`
+# block in this file is IGNORED on 2.4.482–2.4.485 (boot warns "the
+# persistence block is no longer read"); from 2.4.486 LeafMesh.from_yaml RAISES
+# ConfigError if its values differ from .env, naming each .env line to add
+# (a matching block still loads, with the warning). Remove it. Studio → Infrastructure → Datastores
+# (GET /api/infra/datastore) shows whether the store is reachable; it never
+# shows the address or password. Business-logic persistence (sessions, agent
+# state, yields, feed, HITL) runs on either backend; nothing here changes.
 
 # ── Auto-discover ──
 auto_discover:
   directory: "./agency"
   pattern: "*_agent.py"
   recursive: false
-
-# ── Persistence backend (`persistence`) — Redis (default) OR Postgres ──
-# Business-logic persistence (sessions, agent state, yields, feed, HITL) can
-# run on either backend. Omit the block entirely for Redis via the `redis:`
-# config. Postgres example:
-persistence:
-  backend: postgres          # redis (default) | postgres
-  host: db.internal          # Postgres connection
-  port: 5432
-  database: leafmesh
-  user: leafmesh_app
-  password: "${PG_PASSWORD}"
-  sslmode: require           # optional
-  default_ttl: 3600          # generic key TTL (seconds)
-  session_ttl: 604800        # session lifetime (7 days)
-  pool_min: 1
-  pool_max: 10
 
 # ── Manager (coordination + summarizer) ──
 manager:
@@ -146,40 +152,62 @@ manager:
   can_intervene: true                   # Allow automatic interventions
   health_check_interval: 60            # Seconds between health checks
   agent_timeout_threshold: 180         # Seconds before agent timeout
-  chain_completion_timeout: 60.0       # Seconds for can_call chain completeness
-  coordination_rules: {}               # Custom business rules
+  chain_completion_timeout: 1800.0     # Seconds for can_call chain completeness
+  coordination_rules: {}               # Custom business rules (max_call_depth, agent_rules, reflection_budget, …)
+  # The rule sets sit DIRECTLY under manager: — never under
+  # coordination_rules: (2.4.482; an old file is moved at load, with a warning)
   human_input_rules:
     max_concurrent_requests: 3
     max_agent_requests: 5
     enable_request_queuing: true
-  timeout_rules:
-    max_timeouts_before_escalation: 2
-    timeout_escalation_enabled: true
+  # timeout_rules: REMOVED in 2.4.486 (dropped with a warning) — a seat waits its
+  # time and stops; nobody answering is not escalated
   workflow_pause_rules:
     max_pause_duration_minutes: 30
     max_concurrent_paused_workflows: 2
+    pause_monitoring_enabled: true
+  human_response_rules:
+    approval:   {requires_manager_review: false, auto_escalate: false}
+    escalation: {requires_manager_review: true,  auto_escalate: true}
+    # timeout: REMOVED in 2.4.486 (dropped with a warning)
+  # temperature: 0.1 / max_tokens: 4000 — the Manager's defaults; it reads its own (2.4.485)
+
+# ── Security ──
+security:
+  telemetry_redact_pii: true           # default TRUE (2.4.480): customer content in traces reads
+                                       # <redacted bytes:N>; false = readable. Credentials masked either way
+
+# ── Timeouts ──
+# (scheduler / runtime / limits / connectors / self_healing: see
+# agent-config-fields.md "Runtime Config Blocks")
+timeouts:
+  mesh_call_default_timeout_s: 300     # How long mesh_call waits when no timeout= is passed.
+                                       # `mesh.call_timeout` is GONE (2.4.482) — moved here at
+                                       # load with a warning. Default has been 300 since 2.4.382.
 
 # ── Mesh ──
 mesh:
-  call_timeout: 30                     # Default timeout for mesh calls
   max_chain_events: 50                 # Per-session chain cap — cycle breaker stops the chain past this
                                        # (session status=stopped + ChainCapExceeded). Raise for deep
                                        # research/batch-fanout flows; NOT a fix for unbounded retry edges
+  reply_stream: false                  # default false; always on in workers mode
+  # Provider accounts are vault-only (2.4.481): region / endpoint_url /
+  # project / location / endpoint / headers written here FAIL TO LOAD.
   bedrock:                             # AWS Bedrock (optional)
-    region: "us-east-1"
-    profile: null                      # AWS profile name
-    endpoint_url: null
+    connection: "aws-bedrock"          # AWS Bedrock connection: region (+ endpoint_url)
+    profile: null                      # AWS profile name on the host
   vertex:                              # Google Vertex AI (optional)
-    project: "my-gcp-project"
-    location: "us-central1"
+    connection: "gcp-vertex"           # Google Vertex connection: project_id + location
   foundry:                             # Azure AI Foundry (optional)
-    endpoint: "https://resource.openai.azure.com"
+    connection: "azure-foundry"        # Azure Foundry connection: endpoint + key
     api_version: null
 
 # ── Entry Points ──
+# `target:` must name an agent DEFINED in this same config — the loader
+# rejects a target it cannot resolve.
 entry_points:
   - name: "greet_user"
-    target: "greeter_agent"
+    target: "agent_name"
     condition: "always"
 
 # ── Skills — NOT configured here ──
@@ -195,24 +223,40 @@ entry_points:
 # agents.<name>.skills.sourceName. See SKILL.md → Skills System.
 
 # ── Brokers (v2.3.x — BRD-021 Event Listeners) ──
+# A broker holds ONLY how to REACH the system. What to read from it —
+# topic, consumer group, folder, qos — belongs on the agent's
+# `listen_events`, because two agents may read different topics from one
+# broker. Every broker model is extra="forbid", so putting them here is a
+# load error, not a warning.
+# HOW to reach it — address, sign-in, secrets — is vault-only (2.4.481):
+# the block picks a vault connection of the broker's type with `connection:`;
+# bootstrap_servers / host / port / username / password / url written here
+# FAIL TO LOAD. A missing record switches the consumer off, never blocks boot.
 brokers:
   order_events_kafka:                    # name referenced from agents.<name>.listen_events
     type: "kafka"
-    bootstrap_servers: "kafka.internal:9092"
-    topic: "orders.created"
-    consumer_group: "leafmesh-order-processor"
+    connection: "orders-kafka"           # kafka connection: bootstrap_servers + sign-in
   support_inbox_imap:
     type: "imap"
-    host: "imap.example.com"
-    port: 993
-    user: "support@example.com"
-    password: "${IMAP_PASSWORD}"
-    folder: "INBOX"
-    poll_interval_s: 30
+    connection: "support-imap"           # imap connection: host, port, username, password
+
+# …and the agent says what it wants from them:
+#
+# agents:
+#   order_processor:
+#     listen_events:
+#       - broker: order_events_kafka
+#         topic: "orders.created"
+#         consumer_group: "leafmesh-order-processor"
+#       - broker: support_inbox_imap
+#         folder: "INBOX"
+#         poll_interval_s: 30
+#         unseen_only: true
 
 # ── Agents ──
 agents:
   agent_name:
+    name: "agent_name"
     # ... (see SKILL.md for all fields)
     # super_agent: true   ← v2.3.x — wraps an LLM agent in the multi-phase orchestrator
     # skills: {sourceName: "support_playbooks", enabled: true, names: [...]}   ← v2.3.x
@@ -319,16 +363,40 @@ from leafmesh import SwarmSDK, SwarmConfig, SwarmEvent, SwarmError
 
 ## External Connectors
 
+**`connector_config` is vault-only for the account (2.4.482).** Addresses
+(`url`, `endpoint`, `webhook_url`, `base_url`, …), keys and tokens, client /
+tenant ids, `auth_scheme` and `headers` written here — literal, `${ENV}` or
+`${vault:…}` — **fail to load**. Create the record on Infrastructure → External
+agents → `<framework>` (zapier / composio / n8n / mcp: Infrastructure →
+Integrations), or an "Add custom" record with service type 'External agent' (Tools
+for integrations) whose base URL is the address, and pick it with `connection`
+(zapier: `vault_connection`). Only behaviour stays inline. Since 2.4.485 no
+connector reads its old environment variables (`CREWAI_ENDPOINT`,
+`A2A_AGENT_URL`, `N8N_WEBHOOK_URL`, …) — the record is the only source.
+
+**2.4.486 — pick it from the External agents page.** Set the external agent up
+once on Studio's External agents page (framework, vault record, settings) and
+write only `external_agent: <entry>` on the agent; the mesh fills in
+`framework` and `connector_config`. A different `framework` /
+`connector_config` beside it is refused. The per-framework shapes below still
+load and run as written. A custom agent is `custom_api` (`method`, `path`,
+`query`, `answer_path`; the body is the agent's input) or `a2a`. **2.4.491:**
+the page entry takes its framework from the vault record it picks — name one
+only for a custom record (`a2a` / `custom_api`); one that contradicts the
+record is refused. `POST /api/external-agents/from-spec` reads a swagger /
+OpenAPI file for a Custom API agent. A connector whose record has no address
+is "not set up" (2.4.490): switched off at start, never called, never
+quarantined.
+
 ### CrewAI
 ```yaml
 agents:
   crew_agent:
+    name: "crew_agent"
     agent_type: "external"
     framework: "crewai"
     connector_config:
-      endpoint: "http://localhost:9000"     # CrewAI hosted API
-      # api_key: "${CREWAI_API_KEY}"              # Bearer Token
-      # user_api_key: "${CREWAI_USER_API_KEY}"    # User Bearer Token (preferred over api_key)
+      connection: "crewai"                  # External agents → CrewAI: endpoint + api_key / user_api_key
       # poll_interval: 2.0
       # max_poll_seconds: 300
 ```
@@ -337,11 +405,11 @@ agents:
 ```yaml
 agents:
   graph_agent:
+    name: "graph_agent"
     agent_type: "external"
     framework: "langgraph"
     connector_config:
-      endpoint: "http://localhost:8123"     # LangGraph Platform URL
-      # api_key: "${LANGCHAIN_API_KEY}"
+      connection: "langgraph"               # External agents → LangGraph: platform URL + api_key
       graph_id: "agent"                     # Which graph to run
       # poll_interval: 1.0
       # max_poll_seconds: 300
@@ -351,11 +419,11 @@ agents:
 ```yaml
 agents:
   autogen_agent:
+    name: "autogen_agent"
     agent_type: "external"
     framework: "autogen"
     connector_config:
-      endpoint: "http://localhost:8081"     # AutoGen Studio or custom API
-      # api_key: "${AUTOGEN_API_KEY}"
+      connection: "autogen"                 # External agents → AutoGen: service URL + api_key
       # workflow_id: "my-workflow"
       # timeout: 120
       # poll_interval: 2.0
@@ -366,32 +434,41 @@ agents:
 ```yaml
 agents:
   a2a_agent:
+    name: "a2a_agent"
     agent_type: "external"
     framework: "a2a"
     connector_config:
-      url: "https://remote-agent.example.com"  # A2A agent server URL
-      # auth_token: "${A2A_AUTH_TOKEN}"
-      # auth_scheme: "Bearer"
+      connection: "remote-agent"            # External agents → A2A Protocol: agent URL + auth_token (+ auth_scheme)
       # poll_interval: 2.0
       # max_poll_seconds: 300
+    # request_form:                 # sent as the message's metadata on every call
+    #   region: "eu-west"
 ```
+
+A2A 1.0 (`SendMessage` / `GetTask`) and 0.3 are both spoken: the dialect comes
+from the agent card (`/.well-known/agent-card.json`, older agents
+`/.well-known/agent.json`), and a call the agent answers in the other dialect
+is retried once in it. The conversation continues per mesh session and tenant
+(the agent's context id is kept and sent back). A changed card quarantines the
+agent until a person releases it.
 
 ### MCP (Model Context Protocol)
 ```yaml
 agents:
   # HTTP transport — connects to remote MCP server
   mcp_http_agent:
+    name: "mcp_http_agent"
     agent_type: "external"
     framework: "mcp"
     connector_config:
       tool_name: "search"                   # Required — which tool to call
       transport: "http"
-      url: "http://localhost:3000"
-      # auth_token: "${MCP_API_KEY}"
+      connection: "mcp-search"              # Integrations → MCP (or "Add custom", service type 'Tools'): server URL + auth_token
       # timeout: 60
 
   # stdio transport — launches local MCP server process
   mcp_stdio_agent:
+    name: "mcp_stdio_agent"
     agent_type: "external"
     framework: "mcp"
     connector_config:
@@ -399,6 +476,10 @@ agents:
       transport: "stdio"
       command: "npx"
       args: ["-y", "@mcp/server-filesystem"]
+      # connection: "fs-mcp"                # its secret body rows become the command's env;
+                                            # a credential-named key in env: is refused.
+                                            # 2.4.486: a custom 'Tools' record keeps header rows only —
+                                            # body rows are refused on save / no longer sent
 ```
 
 ### Connector Execution Modes (all frameworks)
@@ -418,7 +499,7 @@ n8n_async:
   agent_type: "external"
   framework: "n8n"
   connector_config:
-    webhook_url: "https://n8n.example.com/webhook/abc"
+    connection: "n8n-async"             # Integrations → n8n: the webhook URL (+ auth_token)
     mode: "callback"
     callback_timeout: 300
 ```
@@ -431,30 +512,31 @@ Only valid on `agent_type: "programmatic"`.
 ```yaml
 agents:
   zapier_agent:
+    name: "zapier_agent"
     agent_type: "programmatic"
     integration: "zapier"
     connector_config:
-      connection: "google_sheets"           # Service name
+      connection: "google_sheets"           # Zapier app slug (NOT the vault record)
       action: "create_spreadsheet_row"      # Action to execute
-      # mcp_key: "${ZAPIER_MCP_KEY}"       # MCP path (preferred)
-      # api_key: "${ZAPIER_API_KEY}"       # REST path (fallback)
+      vault_connection: "zapier-main"       # Integrations → Zapier: mcp_key (+ mcp_endpoint)
       # mode: "callback"                   # For async Zapier workflows
       # callback_timeout: 120
 
   composio_agent:
+    name: "composio_agent"
     agent_type: "programmatic"
     integration: "composio"
     connector_config:
       action: "GITHUB_STAR_A_REPOSITORY_FOR_THE_AUTHENTICATED_USER"
-      # api_key: "${COMPOSIO_API_KEY}"
+      connection: "composio"                # Integrations → Composio: api_key
       # entity_id: "default"
 
   n8n_agent:
+    name: "n8n_agent"
     agent_type: "programmatic"
     integration: "n8n"
     connector_config:
-      webhook_url: "http://localhost:5678/webhook/my-workflow"
-      # auth_token: "${N8N_AUTH_TOKEN}"
+      connection: "n8n-workflow"            # Integrations → n8n: webhook URL + auth_token
       # timeout: 60
       # mode: "callback"                   # For fire-and-forget n8n workflows
       # callback_timeout: 120
@@ -465,11 +547,11 @@ agents:
 from leafmesh import pre_compose, zapier, mcp, composio, n8n
 
 @pre_compose(
-    context_processor=zapier(action="slack_send", api_key="..."),
-    # or: composio(action="GMAIL_SEND", api_key="..."),
-    # or: mcp("http://localhost:3000", "search"),
-    # or: n8n("http://localhost:5678/webhook/abc"),
-    # callback mode: n8n("http://n8n.example.com/webhook/abc", mode="callback", callback_timeout=120),
+    context_processor=zapier(action="slack_send", connection="zapier-main"),
+    # or: composio(action="GMAIL_SEND", connection="composio-main"),
+    # or: mcp("search", connection="search-mcp"),   # 2.4.497: a Tools record
+    # or: n8n(connection="n8n-orders"),
+    # callback mode: n8n(connection="n8n-orders", mode="callback", callback_timeout=120),
 )
 async def my_agent(llm_response, input_data, context):
     integration_result = context["prepared_data"]["business_context"]
@@ -477,6 +559,22 @@ async def my_agent(llm_response, input_data, context):
 ```
 
 All helpers accept `mode="callback"` and `callback_timeout=N` parameters.
+
+**Since 2.4.485 `zapier()`, `composio()` and `n8n()` read their address and key
+from a vault record** named with `connection=` (Infrastructure → Integrations →
+`<platform>`, or an "Add custom" record, service type 'Tools'). An address or
+key written in code — `n8n("https://…")`, `webhook_url=`, `auth_token=`,
+`api_key=`, `mcp_key=` — raises `ValueError` when the helper is created, naming
+the record to make. The record is read at the first call, inside a started
+mesh (outside one it raises).
+
+**Since 2.4.497 `mcp()` works the same way:** `mcp("tool_name",
+connection="<Tools record>")` — the record holds the server's address and
+sign-in. The old `mcp("https://…", "tool")` and an inline `auth_token=` are
+refused, naming the record to make. A local server keeps its command in code
+and its keys in the record: `mcp("tool", connection="<record>",
+transport="stdio", command="npx", args=[...])` — the record's rows become the
+command's environment variables.
 
 ## Event Listeners (BRD-021) — agents fired by external events
 
@@ -498,15 +596,14 @@ Two-part YAML:
 brokers:
   orders_kafka:
     type: kafka
-    bootstrap_servers: ["kafka-1:9092"]
+    connection: orders-kafka     # kafka connection: bootstrap_servers + SASL user/password (vault-only, 2.4.481)
     security_protocol: SASL_SSL
     sasl_mechanism: SCRAM-SHA-512
-    sasl_username: leafmesh
-    sasl_password: ${KAFKA_PASSWORD}
 
 # 2. Bind agents to topics/queues
 agents:
   order_processor:
+    name: "order_processor"
     agent_type: programmatic
     listen_events:
       - broker: orders_kafka
@@ -515,7 +612,7 @@ agents:
         filter:
           source: "/region/us-east-1"        # CloudEvents-style AND-equality filter
         delivery:
-          max_retries: 3
+          max_attempts: 3
           backoff: exponential
           dead_letter:
             broker: orders_kafka
@@ -571,6 +668,26 @@ Each feed post contains:
 }
 ```
 
+## The `leafmesh` command
+
+Two operator commands, run on the host (they read the store from `.env`):
+
+```bash
+# A claude_agent's host rights, saved as the store's next version (2.4.485).
+# The config API refuses these fields; this is how they change.
+leafmesh agent host-rights AGENT [--cwd DIR] [--allowed-tools a,b] \
+    [--permission-mode default|acceptEdits|plan|bypassPermissions] \
+    [--setting-sources user,project,local] [--disallowed-tools a,b] \
+    [--sandbox '{"enabled": true}'] [--clear FIELD] [--yes]
+#   --setting-sources / --disallowed-tools / --sandbox: 2.4.486
+#   prints the change; saves only with --yes or a typed "apply"; every pod applies it
+
+# Move every stored credential onto a new vault master key (every worker stopped).
+leafmesh vault rotate-key --new-key-file PATH [--generate] [--old-key-file PATH] [--yes]
+#   2.4.485: the store is the one .env names; --config is only an optional old
+#   config.yaml read for the agency's name
+```
+
 ## Environment Variables
 
 | Variable | Required | Purpose |
@@ -579,25 +696,50 @@ Each feed post contains:
 | `LEAFMESH_ENV_TOKEN` | No | Environment token — scopes HITL data + telemetry per environment |
 | `OPENAI_API_KEY` | For OpenAI models | OpenAI API key |
 | `ANTHROPIC_API_KEY` | For Claude models | Anthropic API key |
-| `GOOGLE_API_KEY` | For Gemini models | Google AI API key |
+| `GOOGLE_API_KEY` | For Gemini models | Google AI API key (`GEMINI_API_KEY` also read) |
 | `DEEPSEEK_API_KEY` | For DeepSeek models | DeepSeek API key |
-| `AZURE_OPENAI_API_KEY` | For Foundry | Azure OpenAI key |
+| `AZURE_FOUNDRY_API_KEY` | For Foundry | Foundry key (`AZURE_OPENAI_API_KEY` also read); endpoint in `AZURE_FOUNDRY_ENDPOINT` or on the Azure Foundry record (`mesh.foundry.connection`) — `mesh.foundry.endpoint` is refused since 2.4.481 |
+| `LEAFMESH_AGENCY_NAME` | With `LeafMesh.from_store()` | The agency's name — every key in the store is filed under it. `from_store()` raises `ConfigError` when it is unset. With `from_yaml` the name comes from config.yaml's `name:`; if both are set, keep them equal |
+| `LEAFMESH_STORE` | No | Datastore backend: `redis` (default) \| `postgres`. **The datastore is set ONLY in `.env` (2.4.482)** — a `persistence:`/`redis:` block in the YAML is ignored with a boot warning (2.4.482–2.4.485); from 2.4.486 `LeafMesh.from_yaml` raises `ConfigError` if it differs from `.env`. Set only what you need; the rest default. Studio → Infrastructure → Datastores shows reachability, never the address or password |
+| `REDIS_URL` / `DATABASE_URL` | No | The whole server in one value: `redis://user:pw@host:6379/4` (`rediss://` = TLS) or `postgresql://user:pw@host:5432/db?sslmode=require`. The single names below fill in what the URL leaves out |
 | `REDIS_HOST` | No | Redis host (default: localhost) |
 | `REDIS_PORT` | No | Redis port (default: 6379) |
 | `REDIS_PASSWORD` | No | Redis password |
-| `ZAPIER_NLA_API_KEY` | For Zapier | Zapier NLA key |
-| `COMPOSIO_API_KEY` | For Composio | Composio key |
-| `XAI_API_KEY` | For Grok models | xAI API key |
+| `REDIS_DB`, `REDIS_DEFAULT_TTL`, `REDIS_SESSION_TTL` | No | Redis DB number; generic key TTL and session TTL (seconds) |
+| `REDIS_SSL`, `REDIS_SSL_CERT_REQS`, `REDIS_SSL_CA_CERTS`, `REDIS_SSL_CERTFILE`, `REDIS_SSL_KEYFILE`, `REDIS_SSL_CHECK_HOSTNAME` | No | Redis TLS |
+| `REDIS_CLUSTER_NODES` | No | Comma-separated `host:port` list; setting it means cluster mode |
+| `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | With `LEAFMESH_STORE=postgres` | Postgres address and login |
+| `POSTGRES_SSLMODE`, `POSTGRES_DEFAULT_TTL`, `POSTGRES_SESSION_TTL`, `POSTGRES_POOL_MIN`, `POSTGRES_POOL_MAX` | No | Postgres TLS mode, TTLs (seconds), connection pool size |
+| ~~`ZAPIER_NLA_API_KEY`~~, ~~`COMPOSIO_API_KEY`~~ | **Not read** | Zapier / Composio keys live only on their vault record (Infrastructure → Integrations), picked with `vault_connection` / `connection`. Since 2.4.485 none of the 58 connector variables (`ZAPIER_MCP_KEY`, `COMPOSIO_*`, `N8N_*`, `CREWAI_*`, `A2A_*`, …) is read; boot names each one still set |
+| `XAI_API_KEY` | For Grok models | xAI API key (`GROK_API_KEY` also read) |
 | `MISTRAL_API_KEY` | For Mistral models | Mistral API key |
-| ~~`LEAFMESH_LLM_HARD_TIMEOUT_S`~~ | **DEAD (2.4.131)** | Moved to YAML `timeouts.llm_hard_timeout_s` (default **90**s; timed-out calls retry **once**, then fail; super-agent phases get 600s). The env var is **no longer read** — set the YAML block. Raise for long-running agents with big outputs |
+| `OPENROUTER_API_KEY` | For `openrouter/…` models | OpenRouter key (optional single key for the long tail; reports each call's cost) |
+| `GROQ_API_KEY` | For `groq/…` models | Groq key |
+| `CEREBRAS_API_KEY` | For `cerebras/…` models | Cerebras key |
+| `MOONSHOT_API_KEY` | For `kimi-…` models | Moonshot Kimi key (`KIMI_API_KEY` also read) |
+| `DASHSCOPE_API_KEY` | For `qwen…` models | Alibaba Model Studio key (`QWEN_API_KEY` also read; region-bound — `QWEN_BASE_URL` moves it) |
+| `ZAI_API_KEY` | For `glm-…` models | Z.AI key (`GLM_API_KEY` also read) |
+| `MINIMAX_API_KEY` | For `minimax-…` models | MiniMax key |
+| `INCEPTION_API_KEY` | For `mercury-…` models | Inception key |
+| `META_API_KEY` | For `muse-…` models | Meta Model API key (`MODEL_API_KEY` also read) |
+| `HUNYUAN_API_KEY` | For `hy3…` / `hy4…` / `hunyuan-…` models | Tencent Hunyuan key |
+| `MIMO_API_KEY` | For `mimo-…` models | Xiaomi MiMo key |
+| `STEPFUN_API_KEY` | For `step-…` models | StepFun key (`STEP_API_KEY` also read) |
+| `UPSTAGE_API_KEY` | For `solar-…` models | Upstage key |
+| `POOLSIDE_API_KEY` | For `poolside/…` models | Poolside key |
+| `REKA_API_KEY` | For `reka-…` models | Reka key |
+| `ARCEE_API_KEY` | For `trinity-…` / `arcee-…` models | Arcee key (`ARCEEAI_API_KEY` also read) |
+| `CO_API_KEY` | For `command-…` models | Cohere key (`COHERE_API_KEY` also read) |
+| `<NAME>_BASE_URL` | No | Moves a vendor's address (region or proxy), e.g. `QWEN_BASE_URL`, `OPENROUTER_BASE_URL` |
+| ~~``timeouts.llm_hard_timeout_s``~~ | **DEAD (2.4.131)** | Moved to YAML `timeouts.llm_hard_timeout_s` (default **90**s; timed-out calls retry **once**, then fail; super-agent phases get 600s). The env var is **no longer read** — set the YAML block. Raise for long-running agents with big outputs |
 | `LEAFMESH_SKILLS_DIR` | No | Root dir for `filesystem` skill sources when no `config.root` is set (default `./skills/`) |
 | `LEAFMESH_API_PORT` | No | Mesh API port (default **18820**) |
-| ~~`LEAFMESH_MAX_PARALLEL_TOOL_CALLS`~~ | **DEAD (2.4.131)** | Moved to YAML `limits.max_parallel_tool_calls` (default **8**). Env var no longer read |
-| ~~`LEAFMESH_SUPER_AGENT_STEP_CONCURRENCY`~~ | **DEAD (2.4.131)** | Now a per-agent super-agent dict key: `super_agent: {step_concurrency: N}` (default **4**). Env var no longer read |
+| ~~``limits.max_parallel_tool_calls``~~ | **DEAD (2.4.131)** | Moved to YAML `limits.max_parallel_tool_calls` (default **8**). Env var no longer read |
+| ~~`super_agent: {step_concurrency: N} on the agent`~~ | **DEAD (2.4.131)** | Now a per-agent super-agent dict key: `super_agent: {step_concurrency: N}` (default **4**). Env var no longer read |
 | `LEAFMESH_WORKERS_MODE` | No | `1` enables workers/HA mode — required for running more than one instance against one Redis (exactly-once events, singleton runners, cross-instance locks) |
 | `LEAFMESH_WORKERS` | No | Number of worker processes in workers mode |
-| `LEAFMESH_LEASE_SECONDS` | No | Singleton-runner lease window (default **30**). Raise (e.g. `120`) when Redis is remote over a flaky link so connectivity blips shorter than the window never flap leased runners; heartbeat auto-scales to a third of the window (2.4.107) |
-| `LEAFMESH_LEASE_HEARTBEAT` | No | Explicit lease heartbeat interval override (must be < lease window) |
+| ``runtime.lease_seconds`` | No | Singleton-runner lease window (default **30**). Raise (e.g. `120`) when Redis is remote over a flaky link so connectivity blips shorter than the window never flap leased runners; heartbeat auto-scales to a third of the window (2.4.107) |
+| ``runtime.lease_heartbeat_s`` | No | Explicit lease heartbeat interval override (must be < lease window). No fixed default — `lease_seconds / 3` — so the blank YAML leaves it out on purpose |
 
 ## Webhook HMAC Authentication
 
@@ -626,6 +768,11 @@ except ConfigError as e:
     # Configuration validation error
 except LeafMeshLicenseError as e:
     # License expired or invalid
+# Over HTTP (2.4.481): a plan at its limit or an unpaid invoice answers a NEW
+# session with HTTP 402 and the reason; runs in flight carry on.
+# A model whose provider has no key (2.4.482) raises LeafMeshError:
+# "model 'X' needs the <provider> provider, which has no key here — add one on
+#  Infrastructure → Models, then try again"
 except LeafMeshError as e:
     # Base exception for all SDK errors
 ```
