@@ -7,7 +7,7 @@ playbook on demand: `invoice` (raise an invoice from an accepted quote) and
   * quote_accepted  -> invoice mode, one accepted quote
   * dunning_sweep    -> dun mode, a wake_up cron sweep of the overdue backlog
 
-`instances: N` fans the sweep across parallel copies; each copy calls the
+`scaling.copies.count: N` fans the sweep across parallel copies; each copy calls the
 atomic `claim_billing_work` tool and gets a DISJOINT slice, so copies split
 the backlog instead of all chasing the same invoices (and a single accepted
 quote is won by exactly one copy — the claim is what makes fan-out
@@ -17,7 +17,7 @@ idempotent in both modes).
 already paid (re-checked in code against the store, not trusted from the
 model), records each verified action to the outbox + ledger, and raises an
 escalation for anything severely overdue. Escalations are a LIST so the
-`instances_handoff: last` merge concatenates them across copies rather than
+`scaling.copies.handoff: last` merge concatenates them across copies rather than
 dropping all but the last.
 """
 from __future__ import annotations

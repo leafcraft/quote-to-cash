@@ -9,14 +9,15 @@ a real read. To go live, wire the CPQ/ERP/billing `mcp:` block on the
 agent (each named action becomes its own tool); these dev tools are the
 fallback contract.
 
-Registered by import (`import agency.tools` in main.py) BEFORE `from_yaml`,
+Registered by import (`import agency.tools` in main.py) BEFORE `from_store`,
 so the @global_tool decorators run before the mesh binds tool categories.
 """
 from __future__ import annotations
 
 import os
 
-from leafmesh import global_tool, LeafMeshLogger
+from leafmesh import connection_rows, global_tool, LeafMeshLogger
+from leafmesh.vault.refs import UnresolvedVaultRef
 
 try:
     from ._shared import store
@@ -28,19 +29,32 @@ except ImportError:  # pragma: no cover — direct-run fallback
 logger = LeafMeshLogger(__name__)
 
 
-def _cpq_wired() -> bool:
-    """True if a real CPQ/ERP price-book connector is configured."""
-    return bool(os.getenv("CPQ_MCP_URL"))
+async def _vault_record_exists(name: str) -> bool:
+    """True when the vault holds a record called `name` (Studio → Infrastructure).
+    The record existing is the "real connector is wired" signal; its address
+    and token stay in the vault and are never read here."""
+    try:
+        await connection_rows(name)
+        return True
+    except UnresolvedVaultRef:
+        return False
+    except PermissionError:  # SecretNotAllowed: the record exists; it only limits which agents read it
+        return True
 
 
-def _billing_wired() -> bool:
-    """True if a real billing/AR connector is configured."""
-    return bool(os.getenv("BILLING_MCP_URL"))
+async def _cpq_wired() -> bool:
+    """True if the CPQ/ERP price-book connector is set up (vault record 'cpq_mcp')."""
+    return await _vault_record_exists("cpq_mcp")
+
+
+async def _billing_wired() -> bool:
+    """True if the billing/AR connector is set up (vault record 'billing_mcp')."""
+    return await _vault_record_exists("billing_mcp")
 
 
 # ── Deal-shaping tools (cass_shaper_agent, category: shaping) ─────────
 @global_tool(category="shaping")
-def read_price_book(skus: str = "") -> dict:
+async def read_price_book(skus: str = "") -> dict:
     """Read per-SKU unit cost + unit list price (cents) from the price book.
 
     Returns the cost basis the deal shaper prices against. Reads the seed
@@ -52,12 +66,13 @@ def read_price_book(skus: str = "") -> dict:
     """
     book = store.price_book()
     if not book:
-        return {"available": False, "reason": "no price book seeded; wire CPQ_MCP_URL"}
+        return {"available": False, "reason": "no price book seeded; create vault record "
+                "'cpq_mcp' on Infrastructure → Integrations → MCP and uncomment the mcp block"}
     wanted = [s.strip() for s in str(skus).split(",") if s.strip()]
     if wanted:
         rows = {s: store.sku_cost(s) for s in wanted}
         missing = [s for s in wanted if not (store.price_book().get(s))]
-        if missing and _cpq_wired():
+        if missing and await _cpq_wired():
             return {"available": False,
                     "reason": f"CPQ wired but returned no price for {missing}"}
         return {"available": True, "skus": rows}
@@ -78,7 +93,7 @@ def read_deal_history(customer_id: str) -> dict:
 
 
 @global_tool(category="shaping")
-def read_competitor_prices(skus: str = "") -> dict:
+async def read_competitor_prices(skus: str = "") -> dict:
     """Read competitor pricing signals for the requested SKUs, so a discount
     can answer a real competitive threat rather than a guess.
 
@@ -87,21 +102,21 @@ def read_competitor_prices(skus: str = "") -> dict:
     """
     wanted = [s.strip() for s in str(skus).split(",") if s.strip()]
     rows = store.competitor_pricing(wanted or None)
-    if not rows and _cpq_wired():
+    if not rows and await _cpq_wired():
         return {"available": False, "reason": "price-intelligence wired but returned nothing"}
     return {"available": True, "signals": rows}
 
 
 # ── Billing / collections tools (billing_agent, category: billing) ───
 @global_tool(category="billing")
-def read_open_invoices(customer_id: str = "") -> dict:
+async def read_open_invoices(customer_id: str = "") -> dict:
     """Read open + overdue invoices (with days_overdue) for the CASH side.
 
     Args:
         customer_id: Scope to one account, or empty for every open invoice.
     """
     rows = store.open_invoices(str(customer_id).strip() or None)
-    if not rows and _billing_wired():
+    if not rows and await _billing_wired():
         return {"available": False, "reason": "billing system wired but returned nothing"}
     return {"available": True, "invoices": rows, "count": len(rows)}
 
@@ -110,7 +125,7 @@ def read_open_invoices(customer_id: str = "") -> dict:
 def claim_billing_work(kind: str, count: int = 5, claim_token: str = "") -> dict:
     """Atomically claim a DISJOINT batch of billing work for this worker copy.
 
-    The fan-out primitive for `instances: N` on billing_agent — each parallel
+    The fan-out primitive for `scaling.copies.count: N` on billing_agent — each parallel
     copy claims its own slice so copies never dun the same invoice twice.
     For a single accepted quote, exactly one copy wins it and the rest get [].
 

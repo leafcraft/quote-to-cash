@@ -1,12 +1,12 @@
 """quote-to-cash — Quote-to-Cash Pod (LeafMesh).
 
 Boot order matters (SDK 2.4.131):
-  1. import agency.tools  -> the @global_tool decorators run BEFORE from_yaml/
+  1. import agency.tools  -> the @global_tool decorators run BEFORE from_store/
      start, so Cass's price/history/competitor tools and billing's
      read/claim tools are registered.
-  2. LeafMesh.from_yaml(...) -> auto_discover wires agency/*_agent.py to YAML.
+  2. LeafMesh.from_store() -> auto_discover wires agency/*_agent.py to YAML.
   3. audit_logger.register(...) -> attach the WORM sink to the custom external
-     qtc_audit_logger_agent (after from_yaml, before start).
+     qtc_audit_logger_agent (after from_store, before start).
   4. leafmesh.start().
 """
 import asyncio
@@ -21,7 +21,7 @@ from agency._shared import audit_logger as _audit_logger
 
 load_dotenv()
 logger = LeafMeshLogger(__name__)
-leafmesh = LeafMesh.from_yaml("configs/config.yaml")
+leafmesh = LeafMesh.from_store()
 
 # Register the WORM audit sink as the intelligence function for the
 # custom external qtc_audit_logger_agent (SDK 2.4+ API).
@@ -40,8 +40,8 @@ async def main():
     leafmesh.event_bus.subscribe(EventType.MANAGER_INTERVENTION, _on_manager_intervention)
     leafmesh.event_bus.subscribe(EventType.INTERVENTION_NEEDED, _on_intervention_needed)
     leafmesh.event_bus.subscribe(EventType.HUMAN_INPUT_TIMEOUT, _on_human_input_timeout)
-    try: await leafmesh.enable_self_healing()
-    except AttributeError: pass
+    # Self-healing is automatic — the SDK enables it during start() on
+    # every operator-facing mesh. No call is needed.
     logger.info("quote-to-cash — Quote to Cash mesh running")
 
     stop = asyncio.Event(); loop = asyncio.get_running_loop()
