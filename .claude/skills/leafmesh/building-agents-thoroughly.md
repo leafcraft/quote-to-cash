@@ -324,15 +324,15 @@ reference implementation of the house style. What building it taught, distilled:
 
 ### B1. The pod shape
 
-A pod is **a coordinator + specialists + a finisher + human gates + a supervisor**:
+A pod is **a coordinator + specialists + a finisher + human members + a supervisor**:
 - **Coordinator** (Remi) — owns the case end-to-end, orchestrates, keeps live
   status, is the single point of contact. **Never does specialist work** (never
   reads a receipt, never approves).
 - **Specialists** (Odo reads/extracts; Fern builds; Sol routes approval→finance) —
   each a role with responsibilities, each self-reliant ([Part A](#part-a--the-agent-built-thoroughly)).
-- **Finisher** — the agent *after* the human gate that produces the real artifact
+- **Finisher** — the agent *after* the human step that produces the real artifact
   ([B4](#b4-the-finisher-pattern)).
-- **Human members** — Finance-Ops Lead (accountable owner), Employee, Approver,
+- **Human members** — Finance-Ops Lead (accountable owner), Employee, Decision-maker,
   Finance Officer — reached in their own channels, first-class, never endpoints.
 - **Supervisor = the LeafMesh Manager** — reads every hand-off; stalls, contract
   violations, repeated errors escalate to the accountable human automatically.
@@ -353,11 +353,11 @@ acting *and* deciding, you've collapsed a control — split it.
   daily cron sweep). Don't force everything through one intake.
 - **Every wire is conditional** on the producer's declared output. A bare
   unconditional edge is a smell that two roles should be one.
-- **HITL gates default-deny.** `fallback_on_timeout: true` + a `fallback_response`
+- **Human steps default-deny.** `fallback_on_timeout: true` + a `fallback_response`
   that resolves to a **non-approving** verdict (`held_for_review`) routed to the
   audit sink. **Silence never advances anything.** Without a fallback, since
   2.4.486 the seat simply stops waiting when its time is up — no escalation, no
-  check-back — so decide on purpose what an unanswered gate does (SKILL.md →
+  check-back — so decide on purpose what an unanswered question to a person does (SKILL.md →
   When nobody answers).
 - **Bounded back-edges.** Re-extract / rejection loops count their rounds *in the
   mesh* (exhaustion counter → terminal route — [Rule 3](SKILL.md#rule-3--bound-every-retry-back-edge)).
@@ -371,13 +371,13 @@ acting *and* deciding, you've collapsed a control — split it.
 The **artifact-producing executor** — the single most load-bearing pattern, and
 the concrete form of "[`@chain` fails
 closed](#a2-the-four-stages--and-what-belongs-in-each)". An agent wired **after**
-the human gate that:
+the human step that:
 
 1. **Re-checks approval** — never trusts that *reaching* the agent means approved.
    An **allow-token allowlist + block-token denylist**, so an unknown/ambiguous
    verdict **fails closed**.
 2. **Enforces deterministic invariants a human can't waive** — PII/policy
-   concerns empty; approver authority re-derived *in code* from the matrix; no
+   concerns empty; decision authority re-derived *in code* from the matrix; no
    double-issue; frequency caps.
 3. **Renders the real artifact** to `./out` (PDF via ReportLab, else Markdown) —
    or an outbox/booking record.
@@ -405,7 +405,7 @@ into a running LeafMesh pod.
 1. **Triggers** (what starts work): an email arrives, a webhook fires, a form is
    submitted, a schedule ticks, a chat message lands. → these become **entry
    points**.
-2. **People** (who decides / owns / claims): approvers, an accountable owner, the
+2. **People** (who decides / owns / claims): decision-makers, an accountable owner, the
    end user. → these become **human members**.
 3. **Systems** (where truth lives / work is recorded): mailbox, file store, ERP,
    CRM, DB, spreadsheet. → candidates for **tools/connectors**.

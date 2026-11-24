@@ -66,7 +66,7 @@ cleared this bar.
 5. **Forward-flow DAG, no conductor hubs.** Work flows forward and the
    originator steps out. Hub agents that re-dispatch create loops. The only
    cycles allowed are **bounded back-edges** (rework), counted and capped.
-6. **Trust by construction.** Human gates are default-deny on timeout (since
+6. **Trust by construction.** Human steps are default-deny on timeout (since
    2.4.486 a seat whose time is up just stops waiting — nothing escalates —
    unless `fallback_on_timeout` answers for it);
    safety rules are enforced in `@chain` (not hoped for in a prompt); every
@@ -95,7 +95,7 @@ type (§3). Aim for the smallest cast that still reads as a real department.
 - **Ingress:** one entry point per channel/trigger; add `brokers` +
   `listen_events` for event/async triggers; `wake_up` cron for sweeps.
 - **Forward edges:** `can_call` with conditions on `calling_agent_response.*`.
-- **Human gates** at every high-judgment or irreversible step (default-deny).
+- **Human steps** at every high-judgment or irreversible step (default-deny).
 - **Bounded back-edges** for rework only (Rule 3 — counter + cap + escape).
 - **Audit terminus** on every branch.
 Sanity-check: is there any hub everything returns to? Remove it.
@@ -239,15 +239,13 @@ Before declaring done, hunt for:
   - A route promised in an agent's **prompt / free-text comment** with **no
     mechanism** (no `can_call` edge, not in the `narration:` field) → a real
     bug; the LLM can't route. Add a `can_call` edge.
-  - The **`narration:` field is a legitimate primitive** — additive,
-    Manager/Summarizer-dispatched, may name *any* agent (only when the
-    Manager is enabled; non-deterministic; ignored if Manager off).
-    Conditions are the authority. So: a **must-happen route** (failure
-    branch, legal/safety/escalation gate, anything default-deny) must be a
-    deterministic **`can_call` condition** — never narration alone. A
-    genuine **"maybe" route** ("if they sound frustrated, perhaps retention")
-    is correctly left as `narration:`. Don't convert advisory additive
-    narration into an exclusive edge (that changes semantics).
+  - The **`narration:` field routes nothing since 2.4.535.** The Manager
+    reads it when it judges a hand-off and tells a person when one went to
+    the wrong agent; it never calls the agent the narration names. So
+    **every route that should happen** (failure branch, legal, safety or
+    escalation step, anything default-deny, and any "maybe" route you want
+    taken) must be a **`can_call` condition**. Keep narration to say what
+    a good hand-off looks like.
 - **LLM-only safety** — PII/escalation/policy enforced only in a prompt; add
   the deterministic `@chain` floor.
 - **Silent dead code** — a `*_agent.py` matching no agent; an external agent

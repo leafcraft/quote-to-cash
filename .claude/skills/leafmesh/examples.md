@@ -7,7 +7,6 @@
 entry_points:
   - name: "support"
     target: "router_agent"
-    condition: "always"
 
 agents:
   router_agent:
@@ -76,7 +75,6 @@ async def router_agent(llm_response, input_data, context):
 entry_points:
   - name: "research"
     target: "coordinator_agent"
-    condition: "always"
 
 agents:
   coordinator_agent:
@@ -333,7 +331,6 @@ agents:
     can_call:
       - agent: "internal_processor"
     yields: {result: object}
-    inputs: {task: string}
 ```
 
 The older shape still loads and runs (and is what you write before the page
@@ -362,7 +359,7 @@ has an entry):
       path: "/v1/quote"
       query: {format: "json"}                   # fixed values, sent on every call
       answer_path: "data.answer"                # the reply field that becomes the output
-    inputs: {sku: string, quantity: number}     # the body IS the agent's input (request_form is refused here)
+    # the body IS the agent's input: the sender's yields (sku, quantity), narrowed with send on its edge (a request_form joins it; the input's own key wins)
 ```
 
 ### Programmatic + Connector (connector-only, no Python needed)
@@ -377,7 +374,6 @@ agents:
       action: "create_spreadsheet_row"
       vault_connection: "zapier-main"     # vault record holding the Zapier MCP key
     yields: {status: string}
-    inputs: {row_data: object}
 
   order_sync_n8n:                         # not named n8n_workflow: that was a generic tool, removed in 2.4.485
     name: "order_sync_n8n"
@@ -389,7 +385,6 @@ agents:
       after_handoff: "wait"               # 2.4.508 (was mode: "callback"); the answer is POSTed back
       callback_timeout: 120
     yields: {result: object}
-    inputs: {data: object}
 ```
 
 ### Post an agent's output to your system when it finishes (`notify`, 2.4.485)
@@ -463,8 +458,8 @@ agents:
       You are a financial advisor. Use the memory of past interactions
       to provide personalized, context-aware advice. Reference previous
       conversations when relevant.
-    memory: true
-    memory_limit: 20       # Load last 20 feed posts
+    memory:
+      limit: 20            # Load last 20 feed posts
     tools: ["market_data", "portfolio_lookup"]
 ```
 
@@ -658,7 +653,6 @@ agents:
 entry_points:
   - name: "research_inbox"
     target: "research_synthesiser"
-    condition: "always"
 ```
 
 ```bash
@@ -751,7 +745,6 @@ agents:
 entry_points:
   - name: "customer_inbox"
     target: "support_agent"
-    condition: "always"
 ```
 
 ### Skills directory layout
@@ -909,7 +902,6 @@ agents:
     agent_type: "llm"
     model: "gpt-4o-mini"
     prompt: "Match the invoice you are given against its purchase order. When done, take the next one with next_work_item."
-    inputs: {invoices: array}
     yields:
       matched: {type: array, items: {type: object, fields: {invoice_id: string, po_id: string}}}
       matched_count: number

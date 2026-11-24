@@ -22,7 +22,7 @@ Two deterministic floors a prompt can't waive live in `@chain`:
      deterministically, whatever the model wrote.
 
 Cass also STASHES the full deal pre-gate: the SDK resumes a chain after a
-human gate with only the human's reply, so the drafter and issuer recover
+human step with only the human's reply, so the drafter and issuer recover
 the deal from the per-session stash.
 """
 from __future__ import annotations

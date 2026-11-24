@@ -9,7 +9,7 @@ deliberately SEPARATE from the issuer (the writer is not the actuator).
 @chain enforce_validity_floor — the deterministic floor a prompt can't
 waive: validity is CAPPED by the deal's discount tier (a deeper discount
 gets a shorter shelf life), recovered from the per-session stash so the cap
-stands on the real tier even though the human gate dropped the chain
+stands on the real tier even though the human step dropped the chain
 payload. The drafter never auto-sends — it assembles; the issuer issues.
 
 The drafter is the agent the approving human seat calls, so it also records
@@ -128,7 +128,10 @@ def _record_approval(input_data: Any, context: Any) -> None:
     sid = resolve_session_id(input_data, context if isinstance(context, dict) else {})
     if not sid:
         return
+    # 2.4.528: the seat's reply_reader puts its reading in `verdict`; the
+    # person's own words stay in human_message.
     stash_put(sid, {**stash_get(sid), "approved_by": seat,
+                    "verdict": _reply_field(input_data, "verdict").lower(),
                     "human_message": _reply_field(input_data, "human_message").lower()})
 
 

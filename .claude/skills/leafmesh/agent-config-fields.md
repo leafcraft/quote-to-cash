@@ -2,7 +2,7 @@
 
 This document lists every configuration field, its type, default value, and accepted values. Use this to build frontend forms, dropdowns, and validation.
 
-**SDK baseline: 2.4.509** (templates pin `leafmesh>=2.4.509`). The fields below make up the agency's configuration document, which **lives in its store** since 2.4.481 — a create-leafmesh project ships no configuration file (`create-leafmesh --start` loads the team with `leafmesh config import --if-empty`; a file given to `from_yaml` is imported only on the first boot); after that it is changed in Studio or through the config API, and a saved setting applies without a restart ([When a saved setting applies](#when-a-saved-setting-applies-24484)).
+**SDK baseline: 2.4.540** (templates pin `leafmesh>=2.4.540`). The fields below make up the agency's configuration document, which **lives in its store** since 2.4.481 — a create-leafmesh project ships no configuration file (`create-leafmesh --start` loads the team with `leafmesh config import --if-empty`; a file given to `from_yaml` is imported only on the first boot); after that it is changed in Studio or through the config API, and a saved setting applies without a restart ([When a saved setting applies](#when-a-saved-setting-applies-24484)).
 
 ---
 
@@ -58,22 +58,22 @@ These fields apply to every agent regardless of `agent_type`.
 | `monthly_token_budget` | int | `null` | > 0 | no | Opt-in monthly token cap for this agent (auto-resets each calendar month). The gate pre-estimates each call and refuses BEFORE spending — the cap is never exceeded. Checked before each model call and each external-agent call (the connector's reported spend counts). Inert on human and programmatic agents. The agent is told on every call where it stands against an even pace for the month, so it paces itself instead of spending it in two days. Ahead of that pace it runs in **lean mode** (2.4.457): every task still runs, each with one normal task's share, and the owner gets a daily Inbox notice. Separately, every LLM task has a ceiling learned from the agent's last normal tasks (about 4× a typical one, once 10 are known); at the ceiling the task answers from what it has. Neither has a field — do not invent one. On an external agent whose connector reports no spend (`framework: custom`, `n8n`, `zapier`, `mcp`, `a2a`, …) the spend is estimated: each call reserves the last call's spend, tokens are estimated from what is sent and received; a cost cap there needs `price_per_1k_tokens` |
 | `monthly_cost_budget` | float | `null` | > 0 (USD) | no | Same as above in dollars; either cap trips the gate |
 | `budget_on_exhaust` | string | `graceful` | `graceful`, `escalate` | no | What exhaustion does: `graceful` = the agent stops cleanly with a `budget_exhausted` marker (yields filled with defaults, chain continues, no alarm); `escalate` = routed to the Manager as an error |
-| `id` | string | generated | any stable string | no | The agent's permanent identity. Memory, experience and channel bindings hang off it, not off `name`. Generated and kept at first boot when omitted |
+| `id` | string | generated | any stable string | no | The agent's permanent identity. Memory, experience and channel bindings hang off it, not off `name`. Generated and kept at first boot when omitted. An agent created or changed through the config API keeps its declared id too (2.4.532; mesh, repository and Playground share one id) |
 | `previous_name` | string | `null` | the old agent name | no | Rename that KEEPS memory: on the renamed agent, name what it was called. Ignored once the move has happened (safe to leave). Refused if the old name is still declared, the agent already has an identity, or two agents claim the same name |
 | `wake_up` | string or list | `null` | cron string; OR (2.4.107+) a list of cron strings; OR a list of `{cron, input, timezone}` entries | no | Scheduled wake-up(s). Multiple schedules per agent are supported; each entry may carry its own `input` dict merged into that wake's payload, and (2.4.124+) its own `timezone` overriding the agent-level one for that schedule. Standard cron day-of-week (0 = Sunday … 6 = Saturday, or `SUN`–`SAT`); a schedule the scheduler cannot run is **refused at load**. See [gotcha #13](nuances-and-gotchas.md#13-wake_up-crons-run-in-utc-unless-you-declare-a-timezone-24124) for `7`, `#n` and `L` |
 | `wake_up_input` | dict | `null` | any JSON object | no | 2.4.107+ — declared input template for scheduled wake-ups. Merged as the BASE of every wake payload (per-schedule `input` overrides it; trigger markers `wake_up_trigger`/`trigger_time` always win). Cron-woken agents receive real input instead of a bare trigger |
 | `timezone` | string | `null` (= UTC) | any IANA zone, e.g. `"Asia/Kolkata"` | no | 2.4.124+ — timezone governing this agent's `wake_up` cron schedules. **Without it, crons run in UTC** — `"0 9 * * *"` fires at 14:30 IST, not 9:00. Validated at config load (a fake zone like `Asia/Bangalore` fails boot with a clear error). Studio offers a picker fed by `GET /api/registry?category=timezones` (2.4.125+) |
 | `listen_events` | list | `[]` | list of `EventListener` entries (see [Event Listeners](#event-listeners--brd-021)) | no | Bind agent to external event sources (Kafka, SQS, MQTT, Redis Streams, IMAP). Each entry references a broker from the top-level `brokers:` block. Parallel to `wake_up` — both are agent-level trigger surfaces |
 | `yields` | dict | `{}` | key: field name, value: type string or nested object | no | Output schema — what the agent produces. Nested objects: `{type: object, fields: {...}}`; arrays: `{type: array, items: ...}`. Any declaration may add `nullable: true` (2.4.104) to accept an explicit null — declare it instead of leaving legitimately-null fields undeclared |
-| `inputs` | dict | `{}` | key: field name, value: type string or nested object | no | Input schema — what agent expects |
-| `can_call` | list | `[]` | list of `{"agent": "name"}` or `{"agent": "name", "condition": "expr"}` | no | Agents this agent can invoke |
-| `narration` | string | `null` | any string (multiline supported) | no | Plain-English routing hints for the Manager — evaluated by the Summarizer when conditions don't cover everything (see [Narration Routing](#narration-routing)) |
+| ~~`inputs`~~ | dict | `{}` | — | no | **Removed (2.4.533).** Loads with a warning ("remove it"); nothing reads it, and a human seat is no longer narrowed by it. The previous agent's output is the input. To hand on only some fields, the SENDER names them with `send` on its `can_call` edge; a file for the next agent is a `files` field in the sender's `yields` |
+| `can_call` | list | `[]` | list of `{"agent": "name"}` or `{"agent": "name", "condition": "expr", "send": [fields]}` | no | Agents this agent can invoke. `send` (2.4.533): the fields of this agent's answer that receiver gets — see [`can_call` Format](#can_call-format) |
+| `narration` | string | `null` | any string (multiline supported) | no | Plain-English hints about where work should go. The Manager reads them when it judges each hand-off; it never calls an agent from them (2.4.535). See [Narration](#narration-routing) |
 | `wait_for` | string or list | `[]` | agent names or expression string | no | Fan-in/join condition |
 | `wait_for_timeout` | int | `60` | 1 – unlimited (seconds) | no | Hard timeout for fan-in |
-| `auto_store_response` | bool | `true` | `true`, `false` | no | Auto-store responses in Redis |
-| `auto_store_yields` | bool | `true` | `true`, `false` | no | Auto-store yields in Redis |
+| ~~`auto_store_response`~~, ~~`auto_store_yields`~~ | — | — | — | no | **Removed (2.4.534).** An agent's answer and yields are always kept for its session. An old config loads with one notice per field |
 | `memory` | bool or dict | `false` | `true`, `false`, or memory config dict | no | Agent memory — see [Memory Config](#memory-config) |
-| `memory_limit` | int | `10` | 1 – 100 | no | Max recent feed posts to load when `memory: true`. **Still a real declared field** (`int`, default `10`) in 2.4.33 — `memory: true` + `memory_limit: N` is valid and verified. Alternatively pass `memory` as a config dict (see [Memory Config](#memory-config)). |
+| ~~`memory_limit`~~ | — | — | — | no | **Removed (2.4.534).** Write `memory: {limit: N}` (see [Memory Config](#memory-config)). An old value loads with a notice and moves into `memory.limit` unless that is already set |
+| `experience` | bool | `true` | `true`, `false` | no | **Lessons (2.4.534 — its own field, separate from `memory`).** The agent keeps a short lesson after a case and reads its lessons before similar work. `experience: false`: every case starts fresh, and `remember` / `recall_experience` leave the prompt. An old `memory: {experience: …}` loads and moves here; both set and disagreeing is refused |
 | `knowledge` | bool or dict | `false` | `false`, or `{serviceName, enabled, groupName}` | no | Knowledge/RAG — see [Knowledge Config](#knowledge-config) |
 | `enforce_yields` | bool | `false` | `true`, `false` | no | Strictly validate this agent's output against the declared `yields:` schema. `false` (default) fills missing keys with type defaults and logs warnings; `true` triggers a Manager-driven retry up to `enforce_yields_retry` times, then escalates. See [Yields Enforcement](#yields-enforcement). |
 | `enforce_yields_retry` | int | `0` | 0 – unlimited | no | Maximum self-correction attempts when `enforce_yields: true`. `0` fails on first contract violation. Each retry passes the previous output + validation errors as feedback so LLM/external/human/programmatic agents can self-correct. Honored by every agent type. |
@@ -198,14 +198,14 @@ You can change an agent's type via `PATCH /api/yaml/agents/{name}`. When `agent_
 
 | Switching away from... | Fields removed |
 |------------------------|----------------|
-| `llm` | `model`, `prompt`, `temperature`, `max_tokens`, `max_completion_tokens`, `reasoning`, `thinking`, `reasoning_budget`, `tools`, `tool_categories`, `context_parts`, `tool_choice`, `response_format` |
-| `human` | `webhook_config`, `human_interface`, `human_timeout_seconds`, `channels`, `is_human_powered` |
+| `llm` | `model`, `prompt`, `temperature`, `max_tokens`, `reasoning`, `thinking`, `reasoning_budget`, `tools`, `tool_categories`, `tool_rules`, `context_parts`, `response_format` |
+| `human` | `webhook_config`, `human_interface`, `human_timeout_seconds`, `channels` |
 | `external` | `framework`, `connector_config` |
 | `programmatic` | `integration` |
 
 This prevents stale configuration from the old type interfering with the new type's execution.
 
-### `yields` and `inputs` Type Strings
+### `yields` Type Strings
 
 Values can be a simple type string (flat field) or a nested object definition.
 
@@ -218,11 +218,12 @@ Values can be a simple type string (flat field) or a nested object definition.
 | `"boolean"` | True/false |
 | `"list"` | Array/list — of **text items**. On an LLM agent, a list with no item type, at any depth, is a **warning** at start and in `/api/yaml/validate` (2.4.486): the model is told to write text items. Declare it as `{type: array, items: string}`, or for objects `{type: array, items: {type: object, fields: {...}}}`. Write `array` in the dict form. Since 2.4.487 `{type: list, items: …}` is read as `array` everywhere too (the model's output hint and the JSON schema; before, it was sent as an object), but `array` is the one form every version reads the same |
 | `"object"` | Dictionary/object (unstructured) |
+| `"files"` | Files the next agent's model receives (2.4.533 accepts it at load). This is how a sender hands a file on, now that `inputs` is gone |
 
 **Nested fields** — value is an object with `type` and `fields`:
 
 ```yaml
-inputs:
+yields:
   # Flat fields
   name: string
   email: string
@@ -235,8 +236,6 @@ inputs:
       start_datetime: string
       end_datetime: string
       timezone: string
-
-yields:
   # Flat
   status: string
 
@@ -249,6 +248,32 @@ yields:
 ```
 
 When a field uses the nested format, the frontend renders individual sub-field editors instead of a single text input. This is useful for external framework integrations (Composio, Zapier, etc.) where the request body has a known structure.
+
+**A field may name a declared data structure (2.4.533 enforces it).** `next_step: NextStep`
+or `order: Order`, where `NextStep` / `Order` are in the top-level
+`data_structures`. The shape now goes to the model in the response schema and the
+prompt (properties, required fields, enum values), and an answer that does not
+match it is a contract error the agent is asked to fix. Before 2.4.533 the model
+was sent a plain string and a mismatch was only a warning event. Good for fixed
+choices: see [DataStructure](#datastructure).
+
+**Task report fields (2.4.533).** Every agent that declares `yields` also
+answers `task_done` (the whole task is finished), `can_retry` (when not done:
+would another round help, or is it blocked) and `reason` (what is missing or
+why it is blocked, in one line). The SDK adds them to the prompt and the
+response schema; leaving them out never breaks the contract.
+
+- **Never declare them, and never use those three names for your own yields**
+  (rename a field like `reason` to `skip_reason`).
+- The answer drives the agent's loop, replacing the separate "is it done?"
+  check: not done and retryable → another round, told the reason; blocked or
+  stuck (two rounds with no tool success) or out of time → handed on with the
+  reason. A real tool that failed on its last call makes the task not done. So
+  a prompt needs no "keep going until…" text.
+- Conditions may route on them: `calling_agent_response.task_done == false`.
+- An agent with no `yields` answers freely; this does not apply to it.
+- A structured answer leaves the turn as plain JSON (2.4.533), not inside a
+  ```` ```json ```` fence.
 
 ### `wait_for` Expression Syntax
 
@@ -282,9 +307,17 @@ Optional-contributor (`?`) semantics — current (v2.4.22+):
   held the target until a running side of an OR finished; before that, late
   arrivals were dropped.)
 - Optional `?` contributors are still waited for, as above.
-- On `wait_for_timeout`: if only in-flight **optionals** are missing,
-  the target runs with what it has; a missing **required** contributor
-  still escalates `FanInTimeout` to the Manager.
+- On `wait_for_timeout`, or when the join can no longer be met (a required
+  contributor failed): **the target runs with what arrived, and its input
+  names who failed or never answered (2.4.533)**. Before 2.4.533 a missing
+  required contributor escalated `FanInTimeout` to the Manager, and with no
+  escalation target the case died unanswered. A contributor that stops with a
+  failed answer counts as failed at once (it no longer sits "in flight").
+- **A join's next round keeps the answers it already has (2.4.533).** When
+  only some members are run again, the others' answers stand; the target does
+  not wait for them again. A round whose only answers are kept ones (a member
+  answered someone else) does not re-run the target; a fresh answer or a
+  failure does.
 - A contributor that **never gets dispatched** (no upstream route fires
   it) stalls the fan-in until `wait_for_timeout` — every `wait_for`
   name should be reachable from some upstream `can_call` in the flow.
@@ -301,7 +334,27 @@ can_call:
   - agent: "next_agent"
   - agent: "conditional_agent"
     condition: "calling_agent_response.status == 'ready'"
+
+# The sender chooses what each receiver gets (2.4.533)
+can_call:
+  - agent: "orders_agent"
+    send: [order_ask, order_id]        # orders_agent gets only these two fields
+  - agent: "products_agent"
+    send: [product_ask]
 ```
+
+- **`send` (2.4.533)** — the fields of this agent's answer that receiver
+  gets, on a hand-off and in a join. Left out = everything. A field left
+  blank is sent blank. `send: []` is **refused** at validate. A field the
+  sender never yields is a **warning** ("sent blank"); the task-report fields
+  (`task_done`, `can_retry`, `reason`) may be sent too. There is no
+  receiver-side `inputs` any more: the previous agent's output is the input.
+- **Each agent is told its own routes (2.4.533).** Its standing instructions
+  carry its `can_call` in plain words (`to refunds when next_step is "refund"`,
+  with what each route gets under `send`) and its `wait_for`;
+  each call says why it came (which agent and which of its conditions held, a
+  join's answers, or an outside message). A prompt need not restate "after you
+  answer, X gets it".
 
 ### Narration Routing
 
@@ -325,23 +378,17 @@ agents:
       If the customer asks about enterprise plans, route to sales_agent.
 ```
 
-**How it works:**
+**How it works (2.4.535 and later):**
 
-1. Conditions are evaluated first by the control plane (AST, instant, deterministic)
-2. Condition targets are dispatched immediately
-3. The Summarizer — which already analyzes every agent output via LLM — sees the narration in its prompt context
-4. The Summarizer's `next_agents` recommendation now reflects both condition-routed agents and narration-suggested agents
-5. The Manager compares `next_agents` against what conditions already dispatched, and calls the difference
+1. `can_call` conditions decide every hand-off (evaluated in code, instant, deterministic).
+2. The Manager reads each run once. The narration is part of what it reads, so it can judge whether the hand-off went to the right agent.
+3. A hand-off it judges wrong, or a part that ended unfinished with nothing handed on, goes to the Operator Inbox for a person. **The Manager never re-routes by itself** and never calls an agent the narration names. (Up to 2.4.534 it called narration-suggested agents in addition to the condition targets; that step is gone.)
 
 **Key rules:**
 
-- Conditions are the authority — narration never overrides a condition result
-- Narration targets are **additive** — they add to condition targets, never remove
-- Narration can reference **any agent** in the mesh, not just those in `can_call`
-- No narration = zero overhead (the Summarizer's prompt is unchanged)
-- If the Manager is disabled, narrations are ignored
-
-See **[Manager — Narration Routing](../core-concepts/manager#narration-routing)** and **[Message Routing](../messages/routing#narration-routing)** for the full flow.
+- A route that must happen (a failure branch, a legal, safety or escalation step, anything default-deny) is a `can_call` condition. Narration alone routes nothing.
+- Use narration to say what a good hand-off looks like, so a wrong one is noticed and told.
+- With the Manager off, narration is not read.
 
 ### Knowledge Config
 
@@ -370,7 +417,7 @@ agents:
 - `query_knowledge` tool is stripped from agents without knowledge enabled
 - The Manager can also have knowledge for SOP awareness (configured under `manager.knowledge`)
 
-See **[Manager — Narration Routing](../core-concepts/manager#narration-routing)** for how knowledge integrates with the Summarizer.
+The Manager reads its own `manager.knowledge` when it reads a run.
 
 ---
 
@@ -385,8 +432,8 @@ These fields are used when `agent_type` is `"llm"`. Ignored for other types.
 | `tenant_credentials_only` | bool | `false` | `true`, `false` | **2.4.488 (any agent type).** When a run carries a tenant id, use only that tenant's own credentials: its model record (and the `model` it picked from the organisation's `tenant_models`) and its record of the name this agent's `connector_config` picks. A tenant with none is stopped with "this tenant has not connected <record>" — never the organisation's. Runs with no tenant use the organisation's records as normal. The Manager always uses the organisation's key. See [SKILL.md → Vault references](SKILL.md#vault-references-your-own-code-and-file-credentials) |
 | `prompt` | string | `null` | any string (multiline supported) | System prompt |
 | `temperature` | float | `0.1` | `0.0` – `2.0` | LLM temperature (creativity/randomness). One default everywhere since 2.4.485 — some run paths used to fall back to 0.3 |
-| `max_tokens` | int | `800` | 1 – model max | Max output tokens (legacy models). One default everywhere since 2.4.485 — some run paths used to fall back to 300 |
-| `max_completion_tokens` | int | `null` | 1 – model max | Max completion tokens (o-series, GPT-5.x, GPT-6 models) |
+| `max_tokens` | int | `800` | 1 – model max | The longest answer the agent may give, in tokens — the one answer-length setting for every model (o-series / GPT-5.x still receive it as `max_completion_tokens` on the wire). One default everywhere since 2.4.485 |
+| ~~`max_completion_tokens`~~ | — | — | — | **Removed (2.4.534).** Write `max_tokens`. An old value loads with a notice and moves into `max_tokens` (when both were set it wins, as before) |
 | `thinking` | bool | `false` | `true`, `false` | Enable SDK chain-of-thought scaffolding tools (works with any model): `chain_of_thought`, `metacognitive_reflection`, `apply_edits`. **Text-only — `thinking` NO LONGER runs code.** The old `python_exec` tool (which ran model code *inside the mesh process*) was removed entirely with no fallback; to run code, use [`sandbox`](#sandbox--sandbox_exec-running-code) instead. **Was `reasoning` pre-v2.2.24** |
 | `reasoning` | bool | `false` | `true`, `false` | Enable provider-native extended thinking/reasoning (requires a reasoning-capable model — see below). **Was `thinking` pre-v2.2.24** |
 | `reasoning_budget` | int | `null` | tokens (provider-specific) | Max native reasoning tokens. Provider defaults apply when omitted. `thinking_budget` is a deprecated alias: the loader reads it as `reasoning_budget` and warns — write `reasoning_budget` |
@@ -405,20 +452,22 @@ These fields are used when `agent_type` is `"llm"`. Ignored for other types.
 | `optimization_strategy` | string | `null` | `performance`, `cost`, `speed` | Per-agent model selection strategy |
 | `context_parts` | dict | `null` | see below | Optional context parts |
 | `tools` | list | `[]` | tool name strings | Available tools. The generic `zapier_action`, `mcp_call`, `composio_action` and `n8n_workflow` were **removed in 2.4.485** (they took an address or key from the model or the environment): listing one refuses the config, naming the agent's `zapier:` / `mcp:` / `composio:` / `n8n:` block that replaces it |
-| `tool_choice` | string | unset | `auto`, `none`, or a specific tool name | Unset by default: the SDK then pins its configured memory / knowledge / reasoning tools on the first turn so they actually fire (gpt-class models otherwise skip them on simple inputs). An explicit `"auto"` switches that pin off. Leave it unset unless you must force `none` or one tool. |
-| `max_tool_calls_per_message` | int | `5` | 0 – 20 | Max tool calls per LLM message — every call the model makes counts (the SDK's own memory / board / playbook calls are free). Reaching it is a **warning, not a failure**: see [gotcha #16](nuances-and-gotchas.md) |
+| ~~`tool_choice`~~ | — | — | — | **Removed (2.4.534).** The Tools list says which tools the agent uses; the mesh decides when a tool must be called. An old value loads with a notice. For one tool, use `tool_rules` |
+| `tool_rules` | dict | `{}` | `{<tool name>: {must_use: bool, exact_inputs: bool}}` | **2.4.534.** Per tool, keyed by the name the model sees (a built-in, an MCP tool's namespaced name, an action). `must_use`: the agent calls it at least once before it answers (one model step per run). `exact_inputs`: the model must send exactly the inputs that tool defines. A name not in the agent's tools draws a warning. `strict_tools` stays the every-tool switch |
+| `max_tool_calls_per_message` | int | `5` | 0 or more (no upper limit since 2.4.528; cost and time limits still apply) | Max tool calls per LLM message — every call the model makes counts (the SDK's own memory / board / playbook calls are free). Reaching it is a **warning, not a failure**: see [gotcha #16](nuances-and-gotchas.md) |
 | `tool_call_timeout` | float | unset | 0.1 – 300 (seconds) | Unset by default: each tool's own budget applies (MCP / Zapier / Composio / n8n declare 60s). Any value you set — 30 included — wins on every tool path |
 | `allow_parallel_tool_calls` | bool | `true` | `true`, `false` | Allow parallel tool execution |
 | `tool_categories` | list | `[]` | category name strings | Tool categories agent can access. `integration` is **refused** since 2.4.485 (its four generic tools were removed) |
 | `effort` | string | `null` | `"low"`, `"medium"`, `"high"` | v2.3.x — Claude 4.8 (Opus / Sonnet) `effort` parameter. Higher effort = deeper reasoning + more output tokens. Only applies to Anthropic Claude 4.8 family; ignored for other models. |
 | `super_agent` | bool \| dict | `false` | `true` / `false` / a tuning dict | Wrap this LLM agent in the multi-phase orchestrator (plan → execute → verify → reflect → finalize). `true` = on with defaults; a **dict** tunes it — the dict is the **only** tuning path (2.4.123+); `tries` (2.4.491) sets attempts per step. See [Super-Agent v3 fields](#super-agent-v3-fields) below |
+| `playbook` | list | `null` | list of `{intent, responsibility, variables, description?}` | The agent's responsibilities, one section per job, read on demand through its own `playbook` tool. See [Playbook Config](#playbook-config) below |
 | `skills` | list \| dict | `null` | `["name", …]` **or** `{sourceName, enabled, names}` | v2.3.x — Skills (reusable instruction playbooks) loaded on demand. `skills: true` (bare bool) is **rejected at YAML load** (`ValidationError`: must be a non-empty list of names, or a `{sourceName, enabled, names}` dict). See [Skills Config](#skills-config) below |
 | `receive_conversation_history` | bool | `false` | `true`, `false` | Inject prior turns of the session's conversation into this agent's context (see `history_limit`). |
 | `history_limit` | int | `20` | ≥ 0 | Max prior turns injected when `receive_conversation_history: true`. |
 | `llm_hard_timeout_s` | float | `null` | seconds | Hard per-call wall-clock timeout for the LLM request; the call is aborted if exceeded. |
 | `response_overrides` | list \| dict | `null` | override rules | Post-hoc overrides applied to the LLM response (e.g. force/patch specific yields). Advanced; see the SDK reference. |
 | `skills_eager` | bool | unset (= `runtime.skills_eager`, itself default `false`) | `true`, `false` | Ship every skill's **full body** in the prompt instead of lazily via `load_skill_reference`. Per-agent override of the mesh default `runtime.skills_eager` (the old `LEAFMESH_SKILLS_EAGER` env var is a deprecated alias that boot warns about; a declared value wins). For finer control use the per-skill `eager: [names]` sub-key of `skills:` (see [Skills Config](#skills-config)). |
-| `schedule_followup` | bool | `true` | `true`, `false` | Offer the `schedule_followup` tool (the agent re-wakes itself later to finish its own work). `false` withholds it from this agent |
+| `schedule_followup` | bool | `true` | `true`, `false` | Offer the `schedule_followup` tool (the agent re-wakes itself later to finish its own work) and, with it, `cancel_followup` (2.4.533: calls off follow-ups THIS agent booked in THIS case, all or one by id; never a person's, the Manager's or another agent's). `false` withholds both from this agent |
 | `max_followup_depth` | int | unset (= 5) | ≥ 1 | How many follow-ups may chain from one another (a follow-up scheduling a follow-up …) |
 | `max_followups_per_session` | int | unset (= 20) | ≥ 1 | Most follow-ups this agent may schedule in one session |
 | `schedule_targets` | list | unset (= its `can_call` agents) | agent names | Agents a follow-up from this agent may be addressed to |
@@ -492,6 +541,50 @@ agents:
 - `Pause` — the LLM signals "I need a human here." Run yields control to HITL; root span stamps `status=OK` (designed exit).
 
 **When to enable**: complex research synthesis, multi-file code changes, multi-page document analysis. **When not to**: one-shot Q&A, classification, summarization — plain LLM agent is faster + cheaper.
+
+### Playbook Config
+
+An agent is a role with several responsibilities (SKILL.md Rule 2). `playbook:`
+holds those responsibilities, one section per job. The agent gets its own
+`playbook` tool (per agent since 2.4.130) and reads a section before doing that
+job. It is written in the config, unlike Skills, which come from a skills source.
+
+```yaml
+agents:
+  claim_builder_agent:
+    agent_type: llm
+    prompt: |
+      You are the Claim Builder. ...hard rules and the output contract...
+      Before each job, load its playbook section: `build_form`, `cross_check`.
+    playbook:
+      - intent: build_form          # one token: letters, digits, _ or -
+        description: "How to fill the reimbursement form from verified items."
+        responsibility: |           # the how-to; may not be empty
+          1. Fill every field from the verified line items, no manual entry.
+          2. ...
+        variables: [claim_id]       # required list, may be []
+      - intent: cross_check
+        responsibility: |
+          ...
+        variables: []
+```
+
+| Key | Required | Notes |
+|---|---|---|
+| `intent` | yes | One token (letters, digits, `_`, `-`); anything else is refused at load. It is also the kind of work on the board ticket |
+| `responsibility` | yes | The steps for this job. An empty one is refused at load |
+| `variables` | yes (may be `[]`) | Facts the agent must have established before it finishes this job. The tool lists them in its menu ("have ready: …") and repeats them after the section. They are **not** filled into the text |
+| `description` | no | One line shown next to the intent in the tool's menu |
+
+How the tool behaves: an unknown intent returns an error listing the real ones; reading the
+same intent twice in one run returns "already loaded"; playbook calls do not count toward
+`max_tool_calls_per_message`.
+
+**The pairing rule:** the tool tells the model its responsibilities are *not* in its
+prompt. Move each job's how-to out of `prompt:` into its section and keep only what
+every turn needs in the prompt (who it is, hard rules, routing rules, the output
+contract). A how-to left in both places makes the model skip the playbook. See
+[building-agents-thoroughly.md](building-agents-thoroughly.md) A3.
 
 ### Skills Config
 
@@ -593,9 +686,9 @@ A known model whose provider has **no key** is refused plainly (2.4.482):
 "model 'X' needs the <provider> provider, which has no key here — add one on
 Infrastructure → Models, then try again" — never sent to the local model.
 
-**Provider count depends on the SDK:** PyPI 2.4.418 (customers today) has 10
-built in plus any OpenAI-compatible endpoint; dev 2.4.434+ has 27 (the lists
-below).
+**Provider count depends on the SDK:** 2.4.434 and later (PyPI has 2.4.540)
+have 27 (the lists below); 2.4.418 and older installs have 10 built in plus
+any OpenAI-compatible endpoint.
 
 **OpenAI** (`OPENAI_API_KEY`):
 - `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`
@@ -662,8 +755,7 @@ Endpoint) for another region or a proxy.
 (`GET /api/registry`). The list is only suggestions: each of these vendors
 takes any of its own model ids, a host's with its prefix
 (`openrouter/anthropic/claude-sonnet-5`) (2.4.458). Copy the id exactly from
-the vendor's own model list — never guess one. Vendor rules the SDK applies for you: Xiaomi and Tencent honour only
-`tool_choice: auto` (a pinned choice is left unset); Cohere is never sent
+the vendor's own model list — never guess one. Vendor rules the SDK applies for you: Cohere is never sent
 `parallel_tool_calls`; Groq never gets temperature 0; a hosted GPT-5/6 or
 Claude 4.7+ is never sent temperature. OpenRouter reports each call's
 cost itself; vendors with no published price show "cost unknown".
@@ -674,15 +766,17 @@ default; (2) the customer's own cloud — `bedrock/…`, `vertex/…`,
 
 **AWS Bedrock:**
 - Any Bedrock model ID (e.g. `anthropic.claude-sonnet-4-20250514-v1:0`, `amazon.titan-text-premier-v1:0`), or an SDK alias (`claude-sonnet-4-20250514`, `llama3.1-70b`, `mistral-large`, `command-r-plus`, …)
-- Requires `mesh.bedrock` config
+- Signed in by an AWS Bedrock record in the vault (the agent's `model_connection`)
 
 **Google Vertex AI:**
 - Any Vertex model ID (e.g. `gemini-2.5-pro`); an id with no alias is sent as written
-- Requires `mesh.vertex` config
+- Signed in by a Google Vertex record in the vault (the agent's `model_connection`)
 
 **Azure Foundry:**
 - Any Azure deployment name
-- Requires `mesh.foundry` config
+- Signed in by an Azure Foundry record in the vault (the agent's `model_connection`)
+
+`mesh.bedrock` / `mesh.vertex` / `mesh.foundry` are **removed (2.4.534)**: an old block loads with a notice and its `connection` moves onto each agent on that cloud that names no `model_connection`.
 
 **Local Models (vLLM, SGLang, Ollama, llama.cpp, etc.):**
 - Any model name supported by your local server
@@ -838,11 +932,10 @@ agents:
 
 ## Human Agent Fields (`agent_type: "human"`)
 
-These fields are used when `agent_type` is `"human"`. `is_human_powered` is auto-set to `true`.
+These fields are used when `agent_type` is `"human"` — that alone makes the agent a person's seat (`is_human_powered` was removed in 2.4.534; an old one loads with a notice).
 
 | Field | Type | Default | Accepted Values | Description |
 |-------|------|---------|-----------------|-------------|
-| `is_human_powered` | bool | `false` | `true`, `false` | Auto-synced to `true` when agent_type="human" |
 | `human_interface` | string | `"api"` | `default`, `api`, `webhook`, `custom` | How human receives/submits input (see below). **2.4.486:** the default is still `"api"`, but an `api` seat with no handler registered by your code is answered in the **Inbox** (start logs "no code answers it … its requests appear in the Inbox") — so a seat declared with nothing else works. Before, it failed on its first question |
 | `human_timeout_seconds` | int | `300` | > 0 (seconds; no upper cap) | How long the seat waits for the person. When it is up the seat **stops waiting** (2.4.486) — see [timeouts](#when-nobody-answers-24486) |
 | `human_context_template` | string | `null` | any string | Template for presenting context to human |
@@ -961,8 +1054,31 @@ replaces `intent_model` / `intent_prompt` (moved in at load).
   conditions read (values named in `==` and `!=` conditions are offered to it);
   `can_call` — or the Manager — decides. An answer to an agent's question is
   read before it routes too.
+- **A field compared only with `==` is a closed choice; a field compared with
+  `!=` anywhere in the seat's routes is open (2.4.531).** On an open field the
+  named values are examples, and any other non-empty value the reader returns
+  is kept, so an "otherwise" route (`next_step != 'refund'`) can fire. Name
+  every value in the reader's `prompt` ("refund when…, replace when…,
+  otherwise reply"). Never let an open field's "otherwise" route reach an
+  agent that acts: route the acting path on `==` (`verdict == 'approve'`) and
+  send the rest to a record or a person. The seat's log line
+  `<seat>: reader read {...}` shows the choice the reader made.
+- **A bare agreement never picks an option (2.4.533).** A reply with no word
+  of its own — "yes please", "ok", "sure, go ahead", "confirm" — agrees only
+  to what the asking agent proposed: a value of that field in the answer it
+  handed the seat (read from the question's send record too, so channel seats
+  work). With nothing proposed, the reader's guess is dropped and, where the
+  routes name two or more values for the field, the person is asked
+  "Which one: refund or replace?" in the same thread while the question stays
+  open. A reply that names an option ("approved", "refund it") is read as it
+  says. So for an approval seat, have the asking agent put the value it
+  proposes (e.g. `verdict: approve`) in its own answer, or a plain "ok" comes
+  back as a question.
 - **A person's answer that no route takes ends the conversation and closes
   the ticket** (e.g. "thank you"). It is not sent to an agent by default.
+- **One case is one thread per place (2.4.533).** The first thread a case
+  opens in a channel belongs to the case; another seat asked about the same
+  case posts into it and addresses its person (a Slack/Discord mention).
 - **Shared threads:** a thread keeps every open question asked in it. A reply
   answers one question; the same asker asking again replaces its earlier
   question (closed as `superseded` — no notice, nothing judged). When questions
@@ -982,7 +1098,13 @@ late reply still lands (it is marked `answered_late`). Nobody answering is not
 judged, and a person is never coached.
 
 - `fallback_on_timeout: true` + `fallback_response` still answer for the seat
-  and carry the chain on.
+  and carry the chain on. Since 2.4.528 the fallback goes through the seat's
+  `can_call` like a typed reply (chain, dual, and after a restart): each of its
+  keys reaches the conditions as a field, so give it the value your safe route
+  reads (e.g. `verdict: hold`). It carries `from_agent`, the agent that asked,
+  so an answer-back route still works. On a `chain` seat `human_decision` is
+  set to `timeout` (with `timeout: true`), whatever the fallback says, so never
+  route a fallback on `human_decision`.
 - On an `api` seat whose handler does not answer in time, with no fallback,
   the run fails with a timeout error.
 - Removed (dropped with a warning if still present):
@@ -1008,7 +1130,7 @@ These fields are used when `agent_type` is `"external"`.
 | Field | Type | Default | Accepted Values | Required | Description |
 |-------|------|---------|-----------------|----------|-------------|
 | `external_agent` | string | `null` | the name of an entry on the **External agents page** | no | **2.4.486 — the normal way.** The external agent is set up once on Studio's External agents page (`/api/external-agents`: framework, vault record, framework settings); the agent names the entry and nothing else about it. The mesh fills in `framework` and `connector_config` from the entry — at start, on every save, and on other pods when the entry changes. A `framework` or `connector_config` written beside it that **differs** from the entry is refused (one that matches is accepted). Only `external_agent` is saved. An entry that is gone: start logs it and the agent **refuses its calls** — it never runs as `custom`. See [External agents page](#external-agents-page-24486) |
-| `framework` | string | `null` | `crewai`, `langgraph`, `autogen`, `a2a`, `custom_api`, `mcp`, `zapier`, `composio`, `n8n`, `hermes`, `lyzr`, `writer`, `dify`, `flowise`, `vellum`, `stackai`, `agentforce`, `watsonx`, `relevance`, `wordware`, `lindy`, `claude_agent`, `openai_agents`, `claude_managed`, `openai_agents_api`, `foundry_agents`, `vertex_agent_engine`, `bedrock_agentcore`, `copilot_studio`, `mistral_agents`, `letta`, `glean_agents`, `servicenow`, `sap_joule`, `workday`, `box`, `atlassian_rovo`, `gemini_enterprise`, `elevenlabs_agents`, `vapi`, `retell`, `bland`, `custom` | **yes**, unless `external_agent` is set | External framework name. **The four call platforms are new in 2.4.508** (see [Phone-call platforms](#phone-call-platforms-24508)). `custom_api` is new in 2.4.486 (see [custom_api](#custom_api-24486)). The valid list = every registered connector + `custom` (derived live from the connector registry). **`lindy` was added in 2.4.406** (webhook-triggered, callback-answering — see [lindy](#lindy-24406)). **`voiceflow` and `cognigy` were removed in 2.4.395** (voice/chat-bot platforms; LeafMesh agents are task agents) — a config naming either refuses to load. See [Managed-agent platforms](#managed-agent-platforms-2439596) and [A2A platform services](#a2a-platform-services-24396) |
+| `framework` | string | `null` | `crewai`, `langgraph`, `autogen`, `a2a`, `custom_api`, `mcp`, `zapier`, `composio`, `n8n`, `hermes`, `lyzr`, `writer`, `dify`, `flowise`, `vellum`, `stackai`, `agentforce`, `watsonx`, `relevance`, `wordware`, `lindy`, `claude_agent`, `openai_agents`, `claude_managed`, `openai_agents_api`, `foundry_agents`, `vertex_agent_engine`, `bedrock_agentcore`, `bedrock_agents`, `azure_openai_assistants`, `snowflake_cortex_agents`, `databricks_agents`, `copilot_studio`, `mistral_agents`, `letta`, `glean_agents`, `servicenow`, `sap_joule`, `workday`, `box`, `atlassian_rovo`, `gemini_enterprise`, `oracle_fusion`, `uipath`, `pega`, `truefoundry`, `elevenlabs_agents`, `vapi`, `retell`, `bland`, `custom` | **yes**, unless `external_agent` is set | External framework name. **The four call platforms are new in 2.4.508** (see [Phone-call platforms](#phone-call-platforms-24508)). `custom_api` is new in 2.4.486 (see [custom_api](#custom_api-24486)). The valid list = every registered connector + `custom` (derived live from the connector registry). **`lindy` was added in 2.4.406** (webhook-triggered, callback-answering — see [lindy](#lindy-24406)). **`voiceflow` and `cognigy` were removed in 2.4.395** (voice/chat-bot platforms; LeafMesh agents are task agents) — a config naming either refuses to load. See [Managed-agent platforms](#managed-agent-platforms-2439596) and [A2A platform services](#a2a-platform-services-24396) |
 | `connector_config` | dict | `{}` | framework-specific key-values | no | How this agent calls the system (which graph / flow / agent id, mode, timeouts) — passed as `**kwargs` to the connector. Keys, tokens, addresses, account ids and header rows are **vault-only** (picked with `connection`) — see [Common connector_config fields](#common-connector_config-fields-all-frameworks) |
 | `external_policy` | dict | safe defaults | see [External Policy](#external-policy) | no | What this agent may reach, what is sent to it, the largest reply accepted, and when it is quarantined. Safe with no block at all |
 | `request_form` | dict | `{}` | any keys / JSON values, see [Request form](#request-form) | no | Your own fields sent with every request, in that system's place for caller data. Also on a programmatic agent with an `integration` |
@@ -1034,6 +1156,11 @@ agents:
   each framework's form asks for), `GET /api/external-agents/records?framework=`
   (the vault records it can sign in with). An entry an agent picks cannot be
   deleted; changing it reloads the agents that pick it.
+- **Importing a discovered agent (2.4.533).** An entry keeps its `source`
+  (`{repoId, externalId}`); a second entry from the same repository agent is
+  refused (409). `POST /api/external-agents/{name}/test` sends one short real
+  message through the entry's connector and returns `{ok, latency_ms, reply,
+  error, error_code}`.
 - **The record decides the kind (2.4.491).** An entry takes its framework from
   the vault record it picks: a CrewAI record is a CrewAI agent, a LangGraph
   record a LangGraph agent. Leave the entry's `framework` out. Only a custom
@@ -1071,11 +1198,23 @@ Each is a normal `agent_type: external` with its `framework` set:
 | `openai_agents_api` | OpenAI Agents API (distinct from the self-hosted `openai_agents`) |
 | `foundry_agents` | Microsoft Foundry Agents |
 | `copilot_studio` | Microsoft Copilot Studio / Dynamics 365 |
-| `vertex_agent_engine` | Google Vertex AI Agent Engine |
+| `vertex_agent_engine` | Google Vertex AI Agent Engine (2.4.533: `project` is not required on the entry — the Google identity record holds it) |
 | `bedrock_agentcore` | AWS Bedrock AgentCore |
+| `bedrock_agents` | Amazon Bedrock Agents, classic (2.4.533) |
+| `azure_openai_assistants` | Azure OpenAI Assistants (2.4.533) — the record holds the endpoint and signs in by key or Entra |
+| `snowflake_cortex_agents` | Snowflake Cortex Agents (2.4.533) |
+| `databricks_agents` | Databricks agents (2.4.533) |
 | `mistral_agents` | Mistral Agents (2.4.396) |
 | `letta` | Letta (2.4.396) |
 | `glean_agents` | Glean Agents (2.4.396) |
+
+**Cloud-hosted agents sign in with their cloud's identity record (2.4.533).**
+`bedrock_agentcore` and `bedrock_agents` use the Vault's AWS identity,
+`vertex_agent_engine` the Google one, `foundry_agents` and
+`azure_openai_assistants` the Azure one (a role, keys, a service account, a
+managed identity, or this server's own). For AgentCore, Bedrock Agents and
+Vertex only the identity record is offered — their own record type held a key
+those calls cannot use.
 
 Every external agent can carry a monthly budget: where the platform reports
 usage it is metered; where it does not, the mesh estimates each call and
@@ -1086,7 +1225,7 @@ remove it.
 
 ### A2A platform services (2.4.396)
 
-Six enterprise agent platforms reached **over A2A**, each listed as its own
+Enterprise agent platforms reached **over A2A**, each listed as its own
 `framework` (its own Studio entry, Infrastructure card, and name in traces/cost) rather
 than a bare `a2a`:
 
@@ -1098,8 +1237,15 @@ than a bare `a2a`:
 | `box` | Box AI agents |
 | `atlassian_rovo` | Atlassian Rovo agents |
 | `gemini_enterprise` | Gemini Enterprise agents |
+| `oracle_fusion` | Oracle Fusion AI agents (2.4.533) |
+| `uipath` | UiPath agents — UiPath Agent Gateway (2.4.533) |
+| `pega` | Pega agents — the agent's external access on (2.4.533) |
+| `truefoundry` | TrueFoundry agents — an agent in its Agent Registry, through its gateway with a TrueFoundry bearer token (2.4.533) |
 
-Each takes the agent's A2A address (its agent-card URL) from that vendor. An
+Each takes the agent's A2A address (its agent-card URL) from that vendor.
+`a2a` and every service here report `supports.card` (2.4.533): Studio offers
+**Read card** (`POST /api/external-agents/card` — name, description, skills
+and how it signs in; https to public addresses, or loopback). An
 A2A agent whose Agent Card changes is quarantined until a person re-approves it.
 
 ### External Policy
@@ -1112,9 +1258,8 @@ secrets never sent.
 **An agent with no address is not set up (2.4.490).** When the connector's
 address is empty (n8n / Lindy `webhook_url`, A2A `url`, CrewAI / LangGraph /
 AutoGen / Foundry `endpoint`, `custom_api` / Glean / Relevance `base_url`,
-Agentforce `domain_url`, watsonx `service_url`, MCP `url` — or `command` for
-stdio), the agent is switched off at start with "not set up". It is never
-called and never counts toward `quarantine_after` (before 2.4.490 every run
+Agentforce `domain_url`, watsonx `service_url`, MCP `url` — or, for stdio, a `command` the allow-list names), the agent is switched off at start with "not set up". It is never
+called and never counts toward quarantine (before 2.4.490 every run
 called it, it failed at once, and the 5th failure quarantined it). Put the
 address in the vault record; the agent switches back on with no restart.
 `framework: custom` is exempt.
@@ -1123,14 +1268,14 @@ address in the vault record; the agent switches back on with no restart.
 |-------|------|---------|-------------|
 | `allowed_hosts` | list | `[]` | Hosts it may call **besides** the host of its own configured URL (`url` / `endpoint` / `webhook_url` / `base_url`). Exact names or `*.example.com`. Host names, not URLs — a URL is refused at load. Any other host is refused; non-local hosts must use HTTPS |
 | `max_response_bytes` | int | `1000000` | Largest reply accepted. A larger reply is refused as a failure — never silently cut short |
-| `quarantine_after` | int | `5` | Consecutive failures after which calls fail at once without reaching it, until a person releases it with `POST /api/agents/{name}/release`. A success resets the count |
+| ~~`quarantine_after`~~ | — | — | **Gone in 2.4.533** (loads with a warning, not read): the agency's top-level `quarantine:` block decides, per call for an external agent — see SKILL.md "Quarantine" |
 | `send_fields` | list | unset (= every field) | Only these top-level input fields are sent — the conversation history, chain history and rerun note too only when listed. Vault secrets and other internal fields are never sent either way |
 | `redact` | list | `[]` | Extra regular expressions replaced with `[redacted]` in everything sent. A pattern that does not compile is refused at load |
 | `allowed_tools` | list | unset (= every tool the host allows) | **2.4.486, agents that run tools in this process (`claude_agent`).** Only these tools may be called: a name (`Read`), a name pattern (`mcp__leafmesh__*`) or a tool with an argument pattern (`Bash(git *)`). Only narrows the host rights — it can never grant a tool |
 | `denied_tools` | list | `[]` | **2.4.486, same agents.** Tools never called, same forms (`Bash(rm *)`, `WebFetch`). A denied call goes back to the model with the reason and is recorded on the run. A rule in neither form is refused at load |
 
 A cancelled call (its session ended) is neither a success nor a failure for
-`quarantine_after`. An invalid policy refuses the call rather than falling
+quarantine. An invalid policy refuses the call rather than falling
 back to looser defaults. A programmatic agent with an `integration:` is
 governed by the same block.
 
@@ -1153,7 +1298,6 @@ agents:
     external_policy:
       allowed_hosts: ["files.vendor.example", "*.cdn.vendor.example"]
       max_response_bytes: 200000      # a bigger reply is a failure, never cut short
-      quarantine_after: 3             # 3 failures in a row → quarantined until released
       send_fields: ["sku", "quantity"]   # only these input fields go out
       redact: ["\\b\\d{16}\\b"]       # card-like numbers become [redacted]
 ```
@@ -1182,6 +1326,7 @@ overspend.
 | `vellum` | `inputs` |
 | `agentforce` | `variables` |
 | `mcp`, `zapier`, `composio` | the tool's arguments |
+| `autogen`, `claude_agent`, `hermes`, `letta`, `openai_agents`, `openai_agents_api`, `relevance`, `watsonx`, `writer`, `custom_api`, `custom` (2.4.536) | inside the input: its keys join an input map (the input's own key of the same name wins); a text-only system gets "Request fields" lines under its text |
 
 ```yaml
     request_form:
@@ -1361,8 +1506,10 @@ entry:
 | `http_timeout` | float | `120.0` | no | Seconds (also accepts `timeout`) |
 
 **The body is the agent's input** (the mesh's own `_…` keys left out), so a
-field the API wants is one of the agent's `inputs` — `request_form` is refused
-on `custom_api`. Needs `httpx`.
+field the API wants must be in what the previous agent sends it — a field of
+the sender's `yields` (narrow it with `send` on the sender's edge, 2.4.533).
+Since 2.4.536 a `request_form` joins that body too (the input's own key of the
+same name wins). Needs `httpx`.
 
 #### Phone-call platforms (2.4.508)
 
@@ -1379,7 +1526,7 @@ outreach_call:
   framework: "vapi"
   connector_config:
     connection: "vapi-main"     # Infrastructure → External agents → vapi
-  inputs: {phone_number: string}
+  # phone_number comes from the agent before it: a field of that agent's yields
 ```
 
 #### lindy (2.4.406)
@@ -1415,10 +1562,10 @@ MCP supports two transport modes. `tool_name` is always required.
 | Field | Type | Default | Required | Env Fallback | Description |
 |-------|------|---------|----------|-------------|-------------|
 | `tool_name` | string | `""` | **yes** | — | **Which MCP tool to call** — the workflow selector |
-| `transport` | string | `"stdio"` | no | — | Transport mode: `"stdio"` or `"http"` |
+| `transport` | string | `"http"` | no | — | `"http"` (by web address — the normal way). `"stdio"` is for developers who host the mesh: it starts only a program named in `LEAFMESH_MCP_COMMAND_ALLOWLIST` in `.env` (2.4.534); otherwise the agent is skipped |
 | `timeout` | float | `60.0` | no | — | Request timeout (seconds) |
 
-**stdio transport fields:**
+**stdio transport fields** (developers self-hosting only — the program must be in `LEAFMESH_MCP_COMMAND_ALLOWLIST`):
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
@@ -1518,9 +1665,8 @@ agents:
     agent_type: llm
     model: gpt-4o-mini
     mcp:
-      - transport: stdio                  # a server you launch yourself
-        command: python
-        args: [./servers/inventory.py]
+      - transport: http                   # by web address (the normal way)
+        connection: inventory_mcp         # vault: the server's address + token
         name: inventory
         use: [search_docs, fetch_page]    # omit to expose every tool
 ```
@@ -1560,7 +1706,8 @@ mcp:
 
 Since 2.4.481 `url:` and `token:` are **vault-only** — written in the row,
 literal or `${ENV}`, the config fails to load naming the field. A stdio
-server's `env:` may keep plain settings (`LOG_LEVEL: debug`), but a secret or an
+server (developers self-hosting only: it starts only when
+`LEAFMESH_MCP_COMMAND_ALLOWLIST` in `.env` names the program, 2.4.534) keeps its `env:` may keep plain settings (`LOG_LEVEL: debug`), but a secret or an
 address there is written as `${vault:<field>}` of the row's `connection`
 (e.g. `GITHUB_PERSONAL_ACCESS_TOKEN: "${vault:token}"`); a literal is refused.
 
@@ -1571,7 +1718,7 @@ though the resolver had always read that field. 2.4.265 declares it.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `transport` | string | `"http"` | `"http"` for a hosted server, `"stdio"` for one you launch |
+| `transport` | string | `"http"` | `"http"` (also `streamable_http`, `sse`) — by web address. `"stdio"` only for a developer hosting the mesh, with the program in `LEAFMESH_MCP_COMMAND_ALLOWLIST` |
 | `connection` | string | `""` | The server's vault record (its url + token) — **required** for `http` |
 | `command` | string | `""` | Executable — **required** for `stdio` |
 | `args` | list | `[]` | Arguments for the stdio command |
@@ -1585,6 +1732,18 @@ though the resolver had always read that field. 2.4.265 declares it.
 
 - **Tools are namespaced.** A tool arrives as `<server>_<tool>` — `inventory_search`,
   not `search` — so two servers can both publish `search` without colliding.
+  **2.4.528: a vault-backed server's tools are named after its record**,
+  `<record>_<tool>` with `-` becoming `_`: `connection: github-mcp` gives
+  `github_mcp_add_issue_comment` (before, the name came from the address's host,
+  `api_…`). An explicit `name:` on the block still wins. A prompt may use the
+  server's own tool name (`add_issue_comment`); it reaches the tool when exactly
+  one of that agent's tools has that name.
+- **A run whose every outside action failed is a failed run (2.4.528)**, whatever
+  the model answers. An outside action is an MCP or Zapier / Composio / n8n call
+  that changes something; lookups (read-only tools), API-entry calls and the
+  mesh's own tools never count, and one call that worked is enough. The card
+  goes to Blocked with the reason and nothing routes on. So a reply agent's
+  `posted: true` can no longer hide a post that failed.
 - **`tools:` is a positive allowlist for LOCAL tools only.** MCP tools are merged
   in automatically. An agent whose tools are all remote can omit `tools:`
   entirely; adding the MCP tool names there does nothing useful.
@@ -1595,9 +1754,8 @@ though the resolver had always read that field. 2.4.265 declares it.
   and a local tool in the same turn, in parallel or in sequence.
 - **A server that is down at startup does not stop the agency.** The agent starts
   without that server's tools and logs a warning.
-- **Set `tool_choice` / `allow_parallel_tool_calls` on the agent as usual** — they
-  apply to MCP tools too (SDK ≥ 2.4.112; earlier builds dropped these settings
-  when saving an agent that had no local `tools:`).
+- **Set `tool_rules` / `allow_parallel_tool_calls` on the agent as usual** — they
+  apply to MCP tools too (`tool_rules` keys an MCP tool by its namespaced name).
 
 #### zapier
 
@@ -1671,7 +1829,7 @@ Calls a Lyzr Agent Studio hosted agent through its synchronous inference API; re
 | `agent_id` | string | `""` | **yes** | ~~`LYZR_AGENT_ID`~~ | **Which Studio agent to invoke** — the workflow selector |
 | `api_key` | string | `""` | **yes** | ~~`LYZR_API_KEY`~~ | *vault* — Header API key (`x-api-key`) from the agent's "Agent API" panel |
 | `endpoint` | string | `"https://agent-prod.studio.lyzr.ai"` | no | ~~`LYZR_ENDPOINT`~~ | *vault* — Lyzr inference base URL |
-| `user_id` | string | `"leafmesh"` | no | ~~`LYZR_USER_ID`~~ | Who Lyzr attributes the run to |
+| ~~`user_id`~~ | — | — | — | — | **Removed (2.4.534).** The mesh fills it per request: the person who asked, else the tenant, else the session. An old value loads with a notice |
 | `api_mode` | string | `"chat"` | no | — | API surface: `"chat"` or `"stream"` (streamed chunks assembled into one answer) |
 | `system_prompt_variables` | dict | `{}` | no | — | Lyzr system-prompt template variables |
 | `filter_variables` | dict | `{}` | no | — | Lyzr filter/routing variables |
@@ -1698,7 +1856,7 @@ Calls a Dify hosted chat/agent app through its blocking chat endpoint; returns t
 |-------|------|---------|----------|-------------|-------------|
 | `api_key` | string | `""` | **yes** | ~~`DIFY_API_KEY`~~ | *vault* — Per-app API key (NOT the account key) |
 | `endpoint` | string | `"https://api.dify.ai/v1"` | no | ~~`DIFY_ENDPOINT`~~ | *vault* — Dify API base URL |
-| `user_id` | string | `"leafmesh"` | no | ~~`DIFY_USER_ID`~~ | End-user identifier Dify attributes the run to |
+| ~~`user_id`~~ | — | — | — | — | **Removed (2.4.534).** The mesh fills it per request (also for Lyzr and Vertex Agent Engine). An old value loads with a notice |
 | `app_mode` | string | `"chat"` | no | — | **Which Dify app surface to call**: `"chat"` (chat-messages) or `"completion"` (completion-messages) |
 | `input_key` | string | `"query"` | no | — | For completion apps, the input variable name the message maps to |
 | `inputs` | dict | `{}` | no | — | Extra Dify app input variables |
@@ -2201,6 +2359,7 @@ Each entry binds the agent to one source on one broker.
 | `folder` | string | `"INBOX"` | **IMAP** folder to monitor |
 | `poll_interval_s` | float | `null` | **IMAP** polling interval in seconds (IMAP doesn't push) |
 | `unseen_only` | bool | `true` | **IMAP** — process only UNSEEN messages |
+| ~~`conversation_key`~~ | — | — | **No longer a setting (2.4.534).** Messages about the same thing continue one conversation by themselves: the listener reads the source's own conversation id. An old key still loads and is honoured; don't write new ones. **Still true:** exact match only; a new message on a stopped case continues the same session (only an erased one starts over); a system answering the mesh's `notify` webhook names its case with the `X-LeafMesh-Session` header the mesh sent (a body `session_id` still wins) |
 | `filter` | dict | `null` | CloudEvents-style attribute filter — message must match ALL `(key, value)` pairs (AND-semantics) |
 | `deserialize` | string | `null` | Pydantic class for payload deserialization, format `"module.path:ClassName"`. `ValidationError` routes to DLQ |
 | `delivery.max_retries` | int | `3` | Retry attempts before DLQ |
@@ -2283,7 +2442,7 @@ memory: true    # Enabled with defaults
 | `relevance_weight` | float | `0.6` | 0.0 – 1.0 | Weight for relevance scoring |
 | `recency_weight` | float | `0.4` | 0.0 – 1.0 | Weight for recency scoring |
 | `decay_hours` | int | `24` | 1 – unlimited | Hours before entries decay |
-| `experience` | bool | `true` (wherever memory is on) | `true`, `false` | The agent's own private long-term memory (`remember` / `recall_experience`). `experience: false` is the only opt-out: it keeps the shared activity feed and removes both tools from the prompt |
+| ~~`experience`~~ | — | — | — | **Moved out of `memory` (2.4.534):** Lessons are the agent field `experience: true|false` (default on), separate from `memory`. An old `memory.experience` loads and is moved; both set and disagreeing is refused. `remember` saves a lesson only when the agent's six yes/no answers pass (2.4.533; see SKILL.md, Experience) |
 
 ### Example
 
@@ -2325,7 +2484,8 @@ Each target in the `escalation.targets` list.
 
 | Field | Type | Default | Accepted Values | Applies To |
 |-------|------|---------|-----------------|------------|
-| `type` | string | **required** | `human_agent`, `webhook`, `channel` | all |
+| `type` | string | **required** | `default`, `human_agent`, `webhook`, `channel` | all |
+| `operators` | list | `[]` | email addresses | `default` |
 | `agent` | string | `null` | agent name | `human_agent` |
 | `entry_point` | string | `null` | entry point name | `human_agent` |
 | `connection` | string | `null` | vault record name — an "Add custom" record, service type 'Outbound webhook' (base URL = the address, header rows = headers; the record keeps sign-in only since 2.4.486 — no query or body rows) | `webhook` |
@@ -2335,6 +2495,8 @@ Each target in the `escalation.targets` list.
 | `channel_id` | string | `null` | channel ID | `channel` |
 | `message_template` | string | `null` | text with `{{var}}` placeholders | `channel` |
 
+**`type: default` (2.4.533)** sends the Manager's notices (stuck work, failures that need a person, budgets running low) to the mesh's built-in **Operator Inbox** seat (`operator_inbox`). It is never in `agents:`, never on the canvas, nothing hands it work and it is never part of a case; the people in `operators` and the agency's owners see and answer it. No agent is needed.
+
 A webhook target's `url` and `headers` are **refused at load since 2.4.481** (vault-only) — the shape is `{type: webhook, connection: <name>, method?, payload_template?}`.
 
 ### Example
@@ -2342,6 +2504,9 @@ A webhook target's `url` and `headers` are **refused at load since 2.4.481** (va
 ```yaml
 escalation:
   targets:
+    - type: "default"                # 2.4.533: the mesh's own Operator Inbox
+      operators: ["ops@example.com"]
+
     - type: "human_agent"
       agent: "customer_support_team"
 
@@ -2379,7 +2544,7 @@ escalation:
 | `manager` | object | see [ManagerConfig](#managerconfig) | — | Manager coordination + analysis |
 | `mesh` | object | see [MeshConfig](#meshconfig--cloud-providers) | — | Mesh network + cloud providers |
 | `agents` | dict | `{}` | agent name → AgentConfig | Agent configurations |
-| `entry_points` | list | `[{"name": "default_entry", "target": "summarizer", "condition": "always"}]` | see [Entry Points](#entry-points) | Named portals into mesh |
+| `entry_points` | list | `[{"name": "default_entry", "target": "summarizer"}]` | see [Entry Points](#entry-points) | Named portals into mesh |
 | `data_structures` | dict | `{}` | name → DataStructure | Custom data type definitions |
 | `auto_discover` | dict | `null` | `{"directory": "path", "pattern": "*.py", "recursive": true}` | Auto-discover agent files |
 | `evolution` | object | see [EvolutionConfig](#evolutionconfig) | — | Evolutionary optimization |
@@ -2401,7 +2566,7 @@ the new version up within ~15 s, `runtime.config_sync_poll_s`):
 
 | Setting | Applies |
 |---|---|
-| Everything not listed below — agents, routes, prompts, models, schedules, limits, timeouts, and every `manager.*` setting except `enabled` (rules, timing, routing, model, what it listens to; `manager.command_center` included) | **Live**, in place |
+| Everything not listed below — agents, routes, prompts, models, schedules, limits, timeouts, and every `manager.*` setting except `enabled` (rules, timing, routing, model, what it listens to), and the top-level `command_center` (under `manager:` before 2.4.533) | **Live**, in place |
 | `brokers`, `self_healing.enabled`, `api.cors_origins`, `runtime.lease_seconds`, `runtime.lease_heartbeat_s`, `architecture`, `auto_discover`, `limits.consumer_inflight_max`, `manager.enabled` | The agency **reloads itself in place** within seconds (listed in the save's `reloading_fields`); runs in flight finish first or are picked up again |
 | `evolution_api.enabled`, `.host`, `.port` | **Process restart** (listed in `restart_required_fields`) |
 
@@ -2452,11 +2617,12 @@ loads but does nothing — the block is top-level.
 |-------|------|---------|-----------------|-------------|
 | `enabled` | bool | `true` | `true`, `false` | Enable manager + summarizer |
 | `model` | string | **none — declare it** | same as [Model List](#model-list) | LLM model for Summarizer analysis. No default since 2.4.135 (`ManagerConfig.model` and `SummarizerConfig.model` both default to `None`). With `enabled: true` and no model, `validate_config` DOES flag this one — `"Manager model is required for analysis when enabled"` — unlike a plain agent's missing model, which it lets through. |
-| `domain` | string | `"generic"` | `generic`, `ecommerce`, `data_analysis` | Summarizer domain specialization |
-| `prompt` | string | `null` | any string (multiline supported) | **Evaluation criteria** — tell the Manager what success looks like, what to escalate on, and what patterns to watch. Injected into every Summarizer analysis call as an `EVALUATION CRITERIA` section, alongside the domain prompt. |
+| ~~`domain`~~ | — | — | — | **Removed (2.4.534).** Say what the agency does and for whom in the top-level `description:` (one or two plain sentences); the Manager reads it in every prompt. An old `manager.domain` loads with a notice |
+| `prompt` | string | `null` | any string (multiline supported) | **Evaluation criteria** — tell the Manager what success looks like, what to escalate on, and what patterns to watch. Injected into every Summarizer analysis call as an `EVALUATION CRITERIA` section, alongside the agency's top-level `description`. |
 | `can_intervene` | bool | `true` | `true`, `false` | Allow manager interventions (false = read-only) |
-| `coordination_rules` | dict | `{}` | arbitrary key-values | User-defined business rules (`max_call_depth`, `agent_rules`, `reflection_budget`, …). **Never holds the rule sets below** (2.4.482) |
-| `human_input_rules` / `workflow_pause_rules` / `human_response_rules` | dict | see [Defaults](#human_input_rules-defaults) below | — | The three Manager rule sets — **directly under `manager:`**, never under `manager.coordination_rules:` (2.4.482; a file that still nests them is moved at load, with a warning; if both places differ, the `manager.<name>` one wins). `timeout_rules` was **removed in 2.4.486** (dropped with a warning when present, also under `coordination_rules`) |
+| ~~`max_call_depth`~~ | — | — | — | **Removed (2.4.535)**, here and under `coordination_rules`. An old file loads; it is dropped and that is said once |
+| `coordination_rules` | dict | `{}` | arbitrary key-values | The key the Manager reads is `reflection_budget` (self-checks per agent per case, default 2). Keys whose code is gone (`agent_rules`, `mesh_loops`, `tier_rules`, `manager_authority`, `llm_coordination`, `completion_threshold`) do nothing and only warn at start. **Never holds the rule sets below** (2.4.482) |
+| `workflow_pause_rules` / `human_response_rules` | dict | see the defaults below | — | The two Manager rule sets — **directly under `manager:`**, never under `manager.coordination_rules:` (2.4.482; a file that still nests them is moved at load, with a warning; if both places differ, the `manager.<name>` one wins). `timeout_rules` was **removed in 2.4.486** and `human_input_rules` in **2.4.528** (each dropped with a warning when present, also under `coordination_rules`) |
 | `chain_completion_timeout` | float | `1800.0` | seconds | Wait time before checking chain completeness (`0` or negative switches the check off) |
 | `health_check_interval` | int | `60` | seconds | Seconds between health checks |
 | `agent_timeout_threshold` | int | `180` | seconds | Seconds before agent is timed out |
@@ -2474,12 +2640,12 @@ loads but does nothing — the block is top-level.
 
 ### `manager.prompt` — Evaluation Criteria
 
-Gives the Manager direct context about your mesh's specific purpose, success criteria, and escalation triggers. The Summarizer reads this on every agent turn alongside its domain template.
+Gives the Manager your success criteria and escalation triggers. The Summarizer reads this on every agent turn, together with the agency's top-level `description:` (what it does and for whom — 2.4.534, replaces `manager.domain`).
 
 ```yaml
+description: "A support team that answers customer tickets for a SaaS company."
 manager:
   model: "gpt-4o-mini"
-  domain: "generic"
   prompt: |
     This mesh handles customer support tickets.
     A successful flow means:
@@ -2507,22 +2673,12 @@ manager:
 | `fallback` | string | `"all"` | `all` | Fallback when confidence too low |
 | `decay_days` | int | `30` | 1 – 365 | Days before old routing memory decays |
 
-### `human_input_rules` (Defaults)
+### ~~`human_input_rules`~~ — removed (2.4.528)
 
-The rule sets below are written directly under `manager:` (2.4.482):
-
-```yaml
-manager:
-  human_input_rules: {max_concurrent_requests: 3, max_agent_requests: 5, enable_request_queuing: true}
-  coordination_rules:          # its OTHER keys only (max_call_depth, agent_rules, reflection_budget, …)
-    max_call_depth: 5
-```
-
-| Field | Type | Default |
-|-------|------|---------|
-| `max_concurrent_requests` | int | `3` |
-| `max_agent_requests` | int | `5` |
-| `enable_request_queuing` | bool | `true` |
+`max_concurrent_requests`, `max_agent_requests` and `enable_request_queuing`
+are gone with the block — most of it can be said in a prompt. A config that
+still has `manager.human_input_rules` loads; the block is dropped with one
+warning. Don't write it.
 
 ### ~~`timeout_rules`~~ — removed (2.4.486)
 
@@ -2752,7 +2908,7 @@ until you list origins).
 
 Setting any of these produces no error and no effect — the mesh runs on the
 default and nothing tells you.
-**Still legitimately env:** `LEAFMESH_LICENSE_KEY`, `LEAFMESH_ENV_TOKEN`, `LEAFMESH_AGENCY_NAME`, the datastore names ([Datastore](#datastore-env-only)), `LEAFMESH_VAULT_KEY` and `LEAFMESH_WEBHOOK_SECRET` (never derived since 2.4.507: no vault key stops the start, no webhook secret makes signed webhooks answer 503), `INTERNAL_API_KEY`, `API_URL`/`API_PORT`, `EVOLUTION_API_PORT`, `SSE_COOKIE_SAMESITE`, `WORKERS`(_MODE), `MCP_COMMAND_ALLOWLIST`, `TEAMS_ALLOW_UNVERIFIED`, `YAML_ENV_BLOCKLIST(_EXTRA)`, `HSTS_ENABLED`, `REFERRER_POLICY`, `CSP`, `LEAFMESH_SKILLS_DIR`. **No longer read (2.4.480; boot warns if still set):** `LEAFMESH_OTEL_REDACT_PII` → `security.telemetry_redact_pii`, `LEAFMESH_SKILLS_EAGER` → `runtime.skills_eager`, `LEAFMESH_REGISTRY_LIVE_MODELS` → `runtime.live_model_discovery`. Also removed: `LEAFMESH_WEBHOOK_ALLOW_LEGACY_HMAC` (signed webhooks always need the timestamp and nonce) and the prompt-guardrail bypass (2.4.382 — the guardrail is always on).
+**Still legitimately env:** `LEAFMESH_ENV_TOKEN`, `LEAFMESH_AGENCY_NAME`, the datastore names ([Datastore](#datastore-env-only)), `LEAFMESH_VAULT_KEY` and `LEAFMESH_WEBHOOK_SECRET` (never derived since 2.4.507: no vault key stops the start, no webhook secret makes signed webhooks answer 503), `INTERNAL_API_KEY`, `API_URL`/`API_PORT`, `EVOLUTION_API_PORT`, `SSE_COOKIE_SAMESITE`, `WORKERS`(_MODE), `MCP_COMMAND_ALLOWLIST`, `TEAMS_ALLOW_UNVERIFIED`, `YAML_ENV_BLOCKLIST(_EXTRA)`, `HSTS_ENABLED`, `REFERRER_POLICY`, `CSP`, `LEAFMESH_SKILLS_DIR`. `LEAFMESH_LICENSE_KEY` is read only for the first start or `leafmesh auth register` and is never kept (2.4.538) — keep it out of `.env`. **No longer read (2.4.480; boot warns if still set):** `LEAFMESH_OTEL_REDACT_PII` → `security.telemetry_redact_pii`, `LEAFMESH_SKILLS_EAGER` → `runtime.skills_eager`, `LEAFMESH_REGISTRY_LIVE_MODELS` → `runtime.live_model_discovery`. Also removed: `LEAFMESH_WEBHOOK_ALLOW_LEGACY_HMAC` (signed webhooks always need the timestamp and nonce) and the prompt-guardrail bypass (2.4.382 — the guardrail is always on).
 
 > ⚠️ **The `timeouts` block is REJECTED by ≤2.4.130** (`from_yaml` raises `ConfigError`) — it is only valid on **2.4.131+**. Ship these blocks only when the template floor is `leafmesh>=2.4.131` or higher (the shipped templates now floor at 2.4.484).
 
@@ -2789,7 +2945,7 @@ Set only what you need; unset names keep the SDK defaults.
 | `REDIS_PORT` | `6379` | Redis server port |
 | `REDIS_PASSWORD` | unset | Redis password |
 | `REDIS_DB` | `0` | Redis database number |
-| `REDIS_DEFAULT_TTL` | `3600` | Default key TTL (seconds) |
+| `REDIS_DEFAULT_TTL` | unset | Key TTL (seconds) for a write that gives no expiry of its own. Unset (2.4.535): such a write keeps the session TTL, so nothing disappears sooner than the store's retention; a stated value still wins |
 | `REDIS_SESSION_TTL` | `604800` | Session TTL (seconds). **604800 (7 days)**, not 7200 |
 | `REDIS_SSL` | `false` | Enable TLS for the Redis connection |
 | `REDIS_SSL_CERT_REQS` | `required` | TLS verification mode: `required` \| `optional` \| `none` |
@@ -2803,7 +2959,7 @@ Set only what you need; unset names keep the SDK defaults.
 | `POSTGRES_DB` | `leafmesh` | Database name |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD` | unset | Postgres login |
 | `POSTGRES_SSLMODE` | the driver's default | Postgres TLS mode (e.g. `require`) |
-| `POSTGRES_DEFAULT_TTL` | `3600` | Generic key TTL (seconds) |
+| `POSTGRES_DEFAULT_TTL` | unset | Same as `REDIS_DEFAULT_TTL` (2.4.535: unset keeps the session TTL; a stated value still wins) |
 | `POSTGRES_SESSION_TTL` | `604800` | Session lifetime (seconds, 7 days) |
 | `POSTGRES_POOL_MIN` | `1` | Connection pool minimum |
 | `POSTGRES_POOL_MAX` | `10` | Connection pool maximum |
@@ -2897,10 +3053,27 @@ evolution:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | **required** | `object`, `string`, `number`, `boolean`, `list` |
+| `type` | string | **required** | `object`, `string`, `number`, `integer`, `boolean`, `array` (`list` is read as `array`) |
 | `properties` | dict | `null` | Object properties (for type=object) |
 | `required` | list | `[]` | Required field names |
-| `validation_rules` | dict | `{}` | Validation rules (key-value strings) |
+| `validation_rules` | dict | `{}` | Rules; **every value is text**: `enum: "refund,replace,fix"` (comma-separated), `min` / `max` (number), `min_length` / `max_length` (string/array), `pattern` (regex) — e.g. `max: "100"` |
+
+A `yields` field that names a data structure is the agent's enforced output
+shape (2.4.533): it goes to the model, and a mismatch is a contract error the
+agent fixes. A string structure with `enum` reaches the model as a fixed
+choice:
+
+```yaml
+data_structures:
+  NextStep:
+    type: string
+    validation_rules: {enum: "refund,replace,reply"}
+
+agents:
+  case_builder:
+    yields:
+      next_step: NextStep
+```
 
 ---
 
@@ -2911,9 +3084,11 @@ Each entry point is a named portal into the mesh.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string | **required** | Entry point name |
-| `target` | string | **required** | Target agent name |
+| `target` | string | **required** | Target agent name, or `manager` (2.4.528): the Manager picks the first member for each request |
+| `choose_from` | list | all members | With `target: manager`: the members it may pick from. Needs `manager.model` (the config check says so); when nobody fits, an Inbox notice goes out |
 | `description` | string | optional | Description |
-| `condition` | string | `"always"` | Trigger condition |
+| `condition` | string | `"always"` | **Deprecated (2.4.533): never checked** — every entry point is taken when named. Leave it out |
+| `events` | dict | — | **2.4.528.** A service's own webhooks: `{service: github, connection: <record>, only: [issues.opened, issue_comment.created]}`. The record is an "Inbound events" vault record holding `signing_secret`. Heard at `/webhook/<entry point>/events`. Comments marked `<!-- leafmesh -->` or written by a bot account are ignored, so an agent's own reply never loops back |
 
 ### Example
 
@@ -2925,6 +3100,15 @@ entry_points:
   - name: "direct_research"
     target: "researcher_agent"
     description: "Skip greeting, go straight to research"
+  - name: "github_support"             # 2.4.528: a service's own webhooks
+    target: "triage_agent"
+    events:
+      service: github
+      connection: github-events        # "Inbound events" record: signing_secret
+      only: [issues.opened, issue_comment.created]
+  - name: "front_door"                 # 2.4.528: the Manager picks the first member
+    target: manager
+    choose_from: [billing_agent, support_agent]   # needs manager.model
 ```
 
 ---
@@ -2943,10 +3127,10 @@ These are enforced by Pydantic validators in the SDK:
 | `temperature` + `yields` | `temperature > 0.5` with a yields contract **warns** — keep ≤ ~0.3 for structured output |
 | `communication_type` | Must be `dual` or `chain`. `execute` is read as `chain` (`dual` on a human seat) with a deprecation warning |
 | `optimization_strategy` | Must be `performance`, `cost`, or `speed` (or null) |
-| `max_tool_calls_per_message` | Must be 0–20 |
+| `max_tool_calls_per_message` | Must be 0 or more — no upper limit since 2.4.528 (cost and time limits still apply) |
 | `tool_call_timeout` | Must be > 0 and <= 300 seconds |
-| `tool_choice` | Must be a non-empty string (`auto`, `none`, or a tool name). Leave unset — the SDK pins its configured memory / knowledge / reasoning tools on the first turn; an explicit `auto` switches that off. |
-| `framework` | A registered connector name or `custom` (or null). As of 2.4.508: `crewai`, `langgraph`, `autogen`, `a2a`, `custom_api` (2.4.486), `mcp`, `zapier`, `composio`, `n8n`, `hermes`, `lyzr`, `writer`, `dify`, `flowise`, `vellum`, `stackai`, `agentforce`, `watsonx`, `relevance`, `wordware`, `lindy`, `claude_agent`, `openai_agents`, `claude_managed`, `openai_agents_api`, `foundry_agents`, `vertex_agent_engine`, `bedrock_agentcore`, `copilot_studio`, `mistral_agents`, `letta`, `glean_agents`, `servicenow`, `sap_joule`, `workday`, `box`, `atlassian_rovo`, `gemini_enterprise`, `elevenlabs_agents`, `vapi`, `retell`, `bland` (2.4.508), `custom`. **`lindy` added 2.4.406. Not** `voiceflow`/`cognigy` (removed 2.4.395) |
+| `tool_rules` | Each key a tool name (one not in the agent's tools draws a warning); each value `{must_use, exact_inputs}` booleans |
+| `framework` | A registered connector name or `custom` (or null). As of 2.4.508: `crewai`, `langgraph`, `autogen`, `a2a`, `custom_api` (2.4.486), `mcp`, `zapier`, `composio`, `n8n`, `hermes`, `lyzr`, `writer`, `dify`, `flowise`, `vellum`, `stackai`, `agentforce`, `watsonx`, `relevance`, `wordware`, `lindy`, `claude_agent`, `openai_agents`, `claude_managed`, `openai_agents_api`, `foundry_agents`, `vertex_agent_engine`, `bedrock_agentcore`, `bedrock_agents` (2.4.533), `azure_openai_assistants` (2.4.533), `snowflake_cortex_agents` (2.4.533), `databricks_agents` (2.4.533), `copilot_studio`, `mistral_agents`, `letta`, `glean_agents`, `servicenow`, `sap_joule`, `workday`, `box`, `atlassian_rovo`, `gemini_enterprise`, `oracle_fusion` (2.4.533), `uipath` (2.4.533), `pega`, `truefoundry` (2.4.533), `elevenlabs_agents`, `vapi`, `retell`, `bland` (2.4.508), `custom`. **`lindy` added 2.4.406. Not** `voiceflow`/`cognigy` (removed 2.4.395) |
 | `framework` required | When `agent_type` is `external`, `framework` must be set — or `external_agent` (2.4.486), which fills it in from the External agents page |
 | `external_agent` | A `framework` / `connector_config` beside it that differs from the page's entry → **refused** (2.4.486) |
 | Retired tools | `tools: [zapier_action \| mcp_call \| composio_action \| n8n_workflow]` → **refused at load** (2.4.485), naming the block that replaces each; `tool_categories: [integration]` → **refused** |
@@ -2962,7 +3146,7 @@ These are enforced by Pydantic validators in the SDK:
 | External monthly budget | On an external agent whose connector reports no spend (incl. `framework: custom`): not refused — metered by estimate; `monthly_cost_budget` with no `price_per_1k_tokens` can never bite and draws a load warning (2.4.497) |
 | `memory_strategy` / `knowledge_strategy` | Must be `tool`, `inject` or `both` |
 | `device.connection` | Required when `device:` is present; `approval` must be `ask` or `silent` |
-| `is_human_powered` sync | Auto-set to `true` when `agent_type="human"`, forced to `false` when `agent_type="llm"` |
+| Removed fields (2.4.534) | `is_human_powered`, `memory_limit`, `inputs`, `auto_store_response`, `auto_store_yields`, `max_completion_tokens`, `tool_choice`, `external_policy.audit_retention_days`, connector `user_id` (Dify / Lyzr / Vertex Agent Engine): each loads with one notice and is dropped or moved |
 | `AgentConfig` extras | Allows arbitrary extra fields (`extra="allow"`) |
 | `LeafMeshConfig` extras | Rejects unknown top-level keys (`extra="forbid"`) |
 
@@ -2980,7 +3164,6 @@ Shows which fields are **used** (U), **ignored** (—), or **required** (R) for 
 | `prompt` | U | — | — | — |
 | `temperature` | U | — | — | — |
 | `max_tokens` | U | — | — | — |
-| `max_completion_tokens` | U | — | — | — |
 | `reasoning` | U | — | — | — |
 | `thinking` | U | — | — | — |
 | `reasoning_budget` | U | — | — | — |
@@ -2989,12 +3172,11 @@ Shows which fields are **used** (U), **ignored** (—), or **required** (R) for 
 | `optimization_strategy` | U | — | — | — |
 | `context_parts` | U | — | — | — |
 | `tools` | U | — | — | — |
-| `tool_choice` | U | — | — | — |
+| `tool_rules` | U | — | — | — |
 | `max_tool_calls_per_message` | U | — | — | — |
 | `tool_call_timeout` | U | — | — | — |
 | `allow_parallel_tool_calls` | U | — | — | — |
 | `tool_categories` | U | — | — | — |
-| `is_human_powered` | — | auto | — | — |
 | `human_interface` | — | U | — | — |
 | `human_timeout_seconds` | — | U | — | — |
 | `human_context_template` | — | U | — | — |
@@ -3028,15 +3210,14 @@ Shows which fields are **used** (U), **ignored** (—), or **required** (R) for 
 | `timezone` | U | U | U | U |
 | `listen_events` | U | U | U | U |
 | `yields` | U | U | U | U |
-| `inputs` | U | U | U | U |
+| ~~`inputs`~~ (removed 2.4.533; warned, not read) | — | — | — | — |
 | `can_call` | U | U | U | U |
 | `narration` | U | U | U | U |
 | `knowledge` | U | U | U | U |
 | `wait_for` | U | U | U | U |
 | `wait_for_timeout` | U | U | U | U |
-| `auto_store_response` | U | U | U | U |
-| `auto_store_yields` | U | U | U | U |
 | `memory` | U | U | U | U |
+| `experience` | U | U | U | U |
 
 **Legend:** R = required, U = used, — = ignored, auto = auto-set
 

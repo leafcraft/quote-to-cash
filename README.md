@@ -14,7 +14,7 @@ template (SDK 2.4.131): a team of self-reliant agents, not a pipeline.
 
 A mid-market RFQ lands from **ACME** — 40 Pro seats plus onboarding, close by
 month-end. Today a rep would key the line items, look up costs in the price
-book, guess a discount that beats the competitor, chase the right approver,
+book, guess a discount that beats the competitor, chase the right decision-maker,
 draft the quote, and — weeks later — remember to invoice and then chase the
 payment. This pod runs that whole chain. **Quinn** opens the case and hands it
 to **Cass**, who pulls the price book, this account's deal history, and
@@ -36,12 +36,12 @@ overdue account nobody swept. This pod closes each seam the only honest way.
 the discount tier from the price book, so the gate fires on *computed* numbers,
 not the model's. **The approval matrix is wires, not code** — the whole
 amount × margin × discount policy is readable in one block, and exactly one tier
-fires per deal. **The issuer re-checks that the *required* approver actually
+fires per deal. **The issuer re-checks that the *required* decision-maker actually
 cleared the deal** — the tier is re-derived in code from the financials and
 compared with the seat that approved (recorded from the reply) — before it
 renders or pushes anything, and **deletes a half-issued quote** if its floor
 trips. **Silence never advances a deal** — if nobody answers within the reply
-window, the Inbox card closes and the ticket records that no reply came; nothing
+window, the seat's default reply, `hold`, is recorded in the audit log; nothing
 is approved or issued, and nobody is chased automatically. **Billing never duns a paid invoice**, and its atomic claim means
 parallel copies split the backlog instead of double-chasing. Every decision,
 approval, issuance, held gate, and dunning action lands in a hash-chained WORM
@@ -52,16 +52,16 @@ ledger. ROI: faster quotes, real margin control, no missed invoices, and a live
 
 | Agent | Role (human job title) | Responsibilities | Can perform |
 |---|---|---|---|
-| `quinn_coordinator_agent` | Deal Coordinator | Owns the deal end to end; opens the case, keeps live status, is the single point of contact | LLM; orchestrates Cass→drafter→issuer→billing; routes exceptions to the RevOps Lead; **never prices or approves** |
+| `quinn_coordinator_agent` | Deal Coordinator | Owns the deal end to end; opens the case, keeps live status, is the single point of contact | LLM + **playbook** (open_case / status / escalate); orchestrates Cass→drafter→issuer→billing; routes exceptions to the RevOps Lead; **never prices or approves** |
 | `cass_shaper_agent` | Costing & Deal Shaper | Costs the RFQ, shapes a policy-compliant discount against history + competitive signals | LLM + **super_agent** (autonomous deal shaping) + **playbook** (quote / approve) + price/history/competitor tools; `@chain` **pricing + completeness floors** (fail closed); its wires **are** the approval matrix |
-| `drafter_agent` | Quote Drafter | Assembles the approved quote body + validity and renders a draft | LLM; `@chain` **validity floor** (caps shelf life by tier); renders the draft to `./out` |
-| `quote_issuer_agent` | Quote Issuer | Renders + issues the approved quote artifact and pushes it to the CPQ | Programmatic **finisher**; approve re-check + required-approver re-derivation → invariants → render `./out/<quote>.pdf` → **delete-on-block** → dev-store fallback → WORM |
+| `drafter_agent` | Quote Drafter | Assembles the approved quote body + validity and renders a draft | LLM + **playbook** (draft_quote); `@chain` **validity floor** (caps shelf life by tier); renders the draft to `./out` |
+| `quote_issuer_agent` | Quote Issuer | Renders + issues the approved quote artifact and pushes it to the CPQ | Programmatic **finisher**; approve re-check + required-decision-maker re-derivation → invariants → render `./out/<quote>.pdf` → **delete-on-block** → dev-store fallback → WORM |
 | `billing_agent` | AR & Collections Clerk | Invoices accepted quotes and duns the overdue backlog | LLM + **playbook** (invoice / dun) + **scaling.copies** (backlog fan-out) + **atomic claim** tool + `wake_up`/`timezone`; `@chain` **never duns a paid invoice** |
-| `sales_rep_human` | Sales Rep (Human) | Self-approves small healthy deals; reworks incomplete RFQs | Human gate |
-| `deal_desk_human` | Deal Desk (Human) | Approves >10% off or >$25K list (up to 20% / $100K) | Human gate |
-| `finance_approver_human` | Finance Approver (Human) | Approves >20% off or >$100K list (up to 30% / $1M) | Human gate |
-| `cfo_human` | CFO (Human) | Top-tier authority (margin below 20%, over 30% off, or over $1M) | Human gate |
-| `revops_lead_human` | RevOps Lead (Human) | Accountable owner — resolves escalations, owns policy calls | Human gate — everything that leaves the pod |
+| `sales_rep_human` | Sales Rep (Human) | Self-approves small healthy deals; reworks incomplete RFQs | Human member |
+| `deal_desk_human` | Deal Desk (Human) | Approves >10% off or >$25K list (up to 20% / $100K) | Human member |
+| `finance_approver_human` | Finance decision-maker (Human) | Approves >20% off or >$100K list (up to 30% / $1M) | Human member |
+| `cfo_human` | CFO (Human) | Top-tier authority (margin below 20%, over 30% off, or over $1M) | Human member |
+| `revops_lead_human` | RevOps Lead (Human) | Accountable owner — resolves escalations, owns policy calls | Human step — everything that leaves the pod |
 | `qtc_audit_logger_agent` | WORM audit | Hash-chains every decision, approval, issuance, held gate, dunning action | External (custom sink); terminus |
 
 Approval matrix (list price × post-discount margin × discount — exactly one
@@ -87,7 +87,7 @@ stand-ins that **announce themselves** until you wire Tiers 2–3.
 ### Tier 1 — required to boot (dev mode)
 | Setting | For | Notes |
 |---|---|---|
-| `LEAFMESH_LICENSE_KEY` | LeafMesh runtime | **Required.** |
+| `LEAFMESH_LICENSE_KEY` | first start | Not kept in `.env`: `create-leafmesh --start` (or `--load`) asks for it once at the first start to sign this environment in (leafmesh 2.4.538+) |
 | `ANTHROPIC_API_KEY` | Cass (deal shaping, Claude) | **Required.** |
 | `OPENAI_API_KEY` | Quinn + drafter + billing + Manager (`gpt-4o-mini`) | **Required** unless you change the models. |
 | `REDIS_HOST` / `PORT` / `PASSWORD` | State store | Defaults to `localhost:6379`. Bring your own Redis, or let `create-leafmesh --start .` start one. |

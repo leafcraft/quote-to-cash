@@ -1,6 +1,6 @@
 # LeafMesh — Nuances & Gotchas (READ FIRST)
 
-**SDK baseline: 2.4.509** (templates pin `leafmesh>=2.4.509`). This file captures the non-obvious rules that cause
+**SDK baseline: 2.4.540** (templates pin `leafmesh>=2.4.540`). This file captures the non-obvious rules that cause
 real, hard-to-debug failures. Most "my agent silently does nothing" or "the
 handoff looks empty" or "Gemini behaves differently from GPT" reports trace to
 exactly one item below. Read this before wiring agents.
@@ -225,6 +225,12 @@ user's timed request. If the user wants a timed action and the agent has a tool
 for it, the agent calls that tool NOW. (Description hardened in 2.4.96; it's not
 gated behind a flag by design.)
 
+**Call it off when the work is done (2.4.533).** `cancel_followup` is offered
+wherever `schedule_followup` is (no config). An agent that booked a check-back
+and then closes the case should cancel it, or the check-back still fires on a
+closed case. It touches only follow-ups this agent booked in this case. A turn
+whose only tools are these two still counts as a turn with no work tool.
+
 ---
 
 ## 9. Per-agent monthly budgets (opt-in)
@@ -363,7 +369,9 @@ Three ways people get this wrong:
 2. **Expecting the bare tool name.** Tools arrive namespaced as
    `<server>_<tool>` — `inventory_search`, not `search` — so two servers can
    publish the same name safely. Conditions and metric filters must use the
-   namespaced name.
+   namespaced name. Since 2.4.528 a vault-backed server is named after its
+   record (`connection: github-mcp` → `github_mcp_add_issue_comment`), no longer
+   after the address's host (`api_…`); an explicit `name:` still wins.
 3. **Confusing it with `framework: "mcp"`.** That is the *connector* form, where
    the whole agent is one call to one remote tool named by `tool_name`. It still
    exists and is occasionally right, but it is not how you give an agent a set
@@ -595,10 +603,13 @@ the agent that acts. See [SKILL.md — Approval is routing](SKILL.md#approval-is
 
 ## 23. External agents — what surprises people (2.4.385 / 2.4.386)
 
-- **`request_form` is refused on some frameworks.** `writer`, `watsonx`,
-  `autogen`, `hermes`, `relevance`, `claude_agent`, `openai_agents`,
-  `custom_api` (2.4.486) and `custom` have no place in their request for it, so the config refuses to
-  load. Other limits: ≤ 50 keys, 16 KB, key names `[A-Za-z0-9_.-]` up to 64
+- **`request_form` works on every external agent (2.4.536).** Systems whose
+  request has no place for caller data (`autogen`, `claude_agent`, `hermes`,
+  `letta`, `openai_agents`, `openai_agents_api`, `relevance`, `watsonx`,
+  `writer`, `custom_api`, and your own `custom` function) get the form inside
+  the input: its keys join an input map, and the input's own key of the same
+  name wins; a text-only system gets "Request fields" lines under its text.
+  Limits: ≤ 50 keys, 16 KB, key names `[A-Za-z0-9_.-]` up to 64
   characters, no leading `_`, no secret inline.
 - **A `request_form` key the SDK already sets is ignored** (the message,
   session or conversation id) — warned once at load; the SDK's value is sent.
@@ -609,7 +620,7 @@ the agent that acts. See [SKILL.md — Approval is routing](SKILL.md#approval-is
   `success: false` with an `error` fails the call — so a workflow that means
   "this call failed" must say it that way.
 - **Ending a session cancels the external call**, and a cancelled call does not
-  count toward `quarantine_after`. A connector's own timeout also cancels the
+  count toward quarantine. A connector's own timeout also cancels the
   job on the other side.
 - **Changes apply live.** `framework`, `connection:`, a rotation on the Infrastructure page,
   `can_call`, `request_form`, `external_policy` — no restart. `PATCH` merges a
@@ -646,7 +657,7 @@ the agent that acts. See [SKILL.md — Approval is routing](SKILL.md#approval-is
   needs `a2a` (Custom: A2A) or `custom_api` (Custom: API); a framework that
   contradicts the record is refused. A Custom API agent can start from a
   swagger file: `POST /api/external-agents/from-spec`.
-- **Avoid SDK 2.4.385** (the 2.4.509 baseline is well clear of it): 2.4.385
+- **Avoid SDK 2.4.385** (the 2.4.528 baseline is well clear of it): 2.4.385
   fails `import leafmesh` on Python 3.10–3.13 — fixed in 2.4.386 — and with
   mcp 2 an MCP stdio server could keep the program from exiting.
 
@@ -664,10 +675,13 @@ the agent that acts. See [SKILL.md — Approval is routing](SKILL.md#approval-is
   Variables). Studio → Infrastructure → Datastores shows whether it is
   reachable, never the address or password.
 - **The Manager rule sets go directly under `manager:`** —
-  `human_input_rules`, `workflow_pause_rules`, `human_response_rules`
-  (`timeout_rules` was removed in 2.4.486). Never under `manager.coordination_rules:` (a file
+  `workflow_pause_rules`, `human_response_rules`
+  (`timeout_rules` was removed in 2.4.486, `human_input_rules` in 2.4.528). Never under `manager.coordination_rules:` (a file
   that still nests them is moved at load, with a warning). `coordination_rules`
-  stays for its other keys (`max_call_depth`, `agent_rules`, `reflection_budget`, …).
+  keeps `reflection_budget` (default 2); keys whose code is gone (`agent_rules`,
+  `mesh_loops`, `tier_rules`, `manager_authority`, …) only warn at start. `max_call_depth`
+  was removed in 2.4.535, from `manager:` and from `coordination_rules:` alike
+  (an old file loads; it is dropped and that is said once).
 - **`mesh.call_timeout` is gone** → `timeouts.mesh_call_default_timeout_s`,
   default **300** s (it has been 300 since 2.4.382; text saying 30 is wrong).
   An old `mesh.call_timeout` is moved at load, with a warning. Unrelated to the
@@ -678,7 +692,7 @@ the agent that acts. See [SKILL.md — Approval is routing](SKILL.md#approval-is
   text gets wrong: `scheduler.followup_tick_s` **2** (not 5);
   `security.telemetry_redact_pii` **true** (since 2.4.480 — customer text is
   hidden in traces by default); `manager.max_tokens` **4000**;
-  `manager.chain_completion_timeout` **1800** s; `manager.domain` **"generic"**;
+  `manager.chain_completion_timeout` **1800** s; top-level `description` **""** (2.4.534 — `manager.domain` is gone; write what the agency does and for whom);
   `mesh.reply_stream` **false**. Left out on purpose (no fixed default):
   `runtime.lease_heartbeat_s` (= `lease_seconds / 3`), `api.public_base_url`
   (learned from the first authenticated request), `api.cors_origins` (empty
@@ -830,12 +844,12 @@ off even for its entry points.
 | `mcp:` rows | `{transport, connection, use?, name?, timeout?}` or `{server}`; stdio `env` secrets as `${vault:<field>}` | the MCP server's connection, or an "Add custom" record, service type 'Tools' (base URL = address) | `url`, `token`, a literal secret/address in `env` |
 | `zapier` / `composio` / `n8n` rows | `vault_connection` (or `account:` from the Tools page) | the provider's connection, or an "Add custom" record, service type 'Tools' | `api_key`, `base_url` |
 | `notify` (2.4.485) | `{webhook: <Tools → Webhooks name>, when}` | the Outbound webhook record the webhook picks | an address (`://`, `www.`) |
-| `n8n()` / `zapier()` / `composio()` helpers in your code (2.4.485), `mcp()` (2.4.497) | `connection="<record>"` (`mcp("tool", connection=…)`; stdio: `command`/`args` in code, keys as the record's rows) | Infrastructure → Integrations → `<platform>`, or an "Add custom" record, service type 'Tools' | `n8n("https://…")`, `mcp("https://…", …)`, `webhook_url=`, `auth_token=`, `api_key=`, `mcp_key=` — refused when the helper is created |
+| `n8n()` / `zapier()` / `composio()` helpers in your code (2.4.485), `mcp()` (2.4.497) | `connection="<record>"` (`mcp("tool", connection=…)`; stdio — developers self-hosting only, program named in `LEAFMESH_MCP_COMMAND_ALLOWLIST`: `command`/`args` in code, keys as the record's rows) | Infrastructure → Integrations → `<platform>`, or an "Add custom" record, service type 'Tools' | `n8n("https://…")`, `mcp("https://…", …)`, `webhook_url=`, `auth_token=`, `api_key=`, `mcp_key=` — refused when the helper is created |
 | `brokers` kafka / sqs / imap | `type`, `connection` + behaviour (sasl_mechanism, region, auth, …) | a kafka / sqs / imap connection | addresses, usernames, passwords, keys, PEMs |
 | `brokers` mqtt | `type, connection, use_tls, ssl_cafile, ssl_certfile, ssl_keyfile, client_id, keepalive_s` | mqtt connection, `url` = `mqtt://host:port` or `mqtts://…` | `host`, `port`, `username`, `password`, PEMs |
 | `brokers` redis_streams | `type, connection, db` | redis_streams connection (`url`) | `url` |
 | `connector_config` (external agents; programmatic `integration`) — 2.4.482 | `connection` (zapier: `vault_connection`) + behaviour: `after_handoff` (2.4.508, was `mode`), timeouts, graph / agent / assistant ids, prompts | Infrastructure → External agents → `<framework>`, or an "Add custom" record, service type 'External agent' (base URL = address); zapier / composio / n8n / mcp: Infrastructure → Integrations, or an "Add custom" record, service type 'Tools' | `url`, `endpoint`, `base_url`, `api_base`, `webhook_url`, `mcp_endpoint`, `headers`, `api_key`, `token`, `auth_token`, `bearer_token`, `mcp_key`, `secret`, `password`, `client_id`/`client_secret`, `tenant_id`, `aws_*`, `service_account_json`, `credential_config_json`, `auth_scheme`, `auth_mode`, … (full list: agent-config-fields.md → Common connector_config fields); an `mcp` connector's credential-named `env` entry (use secret body rows on the connection) |
-| `mesh.bedrock` / `vertex` / `foundry` / `local` | `connection` + behaviour (`profile`, `api_version`, `auth_mode`, `server_type`, `timeout`) | AWS Bedrock / Google Vertex / Azure Foundry / Self-hosted model (or an "Add custom" record, service type 'Model') | bedrock `region`, `endpoint_url`; vertex `project`, `location`; foundry `endpoint`; local `endpoint`, `headers` (`LOCAL_MODEL_ENDPOINT` / `LOCAL_MODEL_SERVER_TYPE` in `.env` still work: `.env` wins, else a Local model connection on Infrastructure → Models fills them at boot) |
+| agent `model_connection` for `bedrock/…` / `vertex/…` / `foundry/…` models (2.4.534: `mesh.bedrock` / `vertex` / `foundry` are gone — an old block's `connection` moves onto those agents at load, with a notice; `bedrock.profile` → `AWS_PROFILE` in `.env`; Foundry API version / sign-in come from the record), and `mesh.local` | `model_connection`; local: `connection` + `server_type`, `timeout` | AWS Bedrock / Google Vertex / Azure Foundry / Self-hosted model (or an "Add custom" record, service type 'Model') | `region`, `endpoint_url`, `project`, `location`, `endpoint` (refused — they live on the record); local `endpoint`, `headers` (`LOCAL_MODEL_ENDPOINT` / `LOCAL_MODEL_SERVER_TYPE` in `.env` still work: `.env` wins, else a Local model connection on Infrastructure → Models fills them at boot) |
 
 `connection:` is required for kafka, mqtt, redis_streams and imap brokers, and
 for an http MCP row. Field-level detail: agent-config-fields.md (WebhookConfig,
@@ -850,7 +864,6 @@ write (an old field left at its old default — `parallel: false`,
 
 ```yaml
 finance_agent:
-  inputs: {invoices: array}
   scaling:
     runs: {max: 2}          # at most 2 jobs of this agent at once, across ALL pods
     copies:
@@ -1026,27 +1039,47 @@ target for that:
 
 ---
 
-## The mesh's own sign-in (2.4.497)
+## The mesh's own sign-in (2.4.538)
 
 Each mesh signs in to LeafCraft with its own Ed25519 key pair; the build
 carries no shared key.
 
-- **First start** registers the key with `LEAFMESH_LICENSE_KEY` +
-  `LEAFMESH_ENV_TOKEN` (the real token from Studio; `development`, `default`
-  or empty can't register). ACTIVE at once when both are valid. PENDING only
-  if the organisation turned on "require approval": a brand-new mesh then
-  stops at start ("…waiting for approval in Studio (Keys → SDK access)…");
-  a mesh that already ran keeps going on its cached / signed licence.
-  Organisation admins are emailed on every new registration. A cloud identity
-  outside the organisation's trusted connection is refused, not pending.
-- **Key store:** `security.sdk_auth.key_store: vault` (default) — encrypted
-  with `LEAFMESH_VAULT_KEY` in the mesh's store, shared by every replica
-  (the first makes it under a lock). A wiped store or a new vault key makes a
-  new key pair that registers again; revoke the old one in Studio.
-  `key_store: file` only for a single host with no shared store.
+- **The licence key is never kept (2.4.538).** It is used once, to sign the
+  environment in, and is not stored anywhere — not in the vault, not in
+  `.env`, not in a cloud secret. A signed-in mesh starts without
+  `LEAFMESH_LICENSE_KEY`. Never put it in a template, a `.env`, a Dockerfile
+  or a compose file.
+- **Signing in, once per environment:** `leafmesh auth register` asks for the
+  licence at the terminal (not shown, not kept) or reads `LEAFMESH_LICENSE_KEY`
+  if it is set for that one command; it needs the real `LEAFMESH_ENV_TOKEN`
+  from Studio (`development`, `default` or empty can't register). Exit 0 on
+  ACTIVE or PENDING, 1 otherwise. A create-leafmesh project does this for you:
+  `create-leafmesh --start` (or `--load`) checks `leafmesh auth status` and,
+  if not signed in, asks for the licence once (only at a terminal) and passes
+  it to the register command only — in Docker by name (`-e
+  LEAFMESH_LICENSE_KEY`), never on the command line. Setting
+  `LEAFMESH_LICENSE_KEY` for the first start only also works; the mesh then
+  logs that it can be removed.
+- **ACTIVE** at once when both are valid. **PENDING** only if the
+  organisation turned on "require approval": approve it in Studio under
+  **Keys › Mesh access**, then start again. A mesh that is not signed in stops
+  at start with `LeafMeshLicenseError` "This environment is not signed in
+  yet…". Organisation admins are emailed on every new registration. A cloud
+  identity outside the organisation's trusted connection is refused, not
+  pending.
+- **Every pod shares one sign-in** through the store: they need the same
+  `LEAFMESH_ENV_TOKEN`, `LEAFMESH_VAULT_KEY` and store. A revoked or expired
+  sign-in: run `leafmesh auth register` again (or `leafmesh auth rotate`).
+- **Key store:** always the vault — encrypted with `LEAFMESH_VAULT_KEY` in
+  the mesh's store, shared by every replica (the first makes it under a
+  lock). A wiped store or a new vault key makes a new key pair that registers
+  again; revoke the old one in Studio. `security.sdk_auth` was removed in
+  2.4.534: an old block loads with a notice, and a key pair it kept in a file
+  is brought into the vault at the next start (nothing re-registered).
 - **CLI:** `leafmesh auth status [--check]` (ids and fingerprints, never a
-  key), `leafmesh auth register`, `leafmesh auth rotate` (switches once the
-  new key is active, then revokes the old). A revoked or expired key is never
+  key), `leafmesh auth register`, `leafmesh auth rotate` (both ask for the licence
+  once and do not keep it; rotate switches once the new key is active, then
+  revokes the old). A revoked or expired key is never
   revived.
 - **The env token also namespaces the store.** An existing agency moving
   from `LEAFMESH_ENV_TOKEN=development` to its real token starts on an empty

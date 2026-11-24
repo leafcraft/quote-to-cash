@@ -77,8 +77,8 @@ posts, next_cursor = await sdk.get_agent_feed("agent_name", count=50, cursor="+"
 posts, next_cursor = await sdk.get_session_feed("session_id", count=50, cursor="+")
 
 # Custom LLM provider — use only for providers NOT already built in.
-# Built-in providers — PyPI 2.4.418 (customers today): 10 + any OpenAI-compatible
-# endpoint. Dev 2.4.434+: 27 — OpenAI, Anthropic, Google, DeepSeek, AWS Bedrock,
+# Built-in providers — 2.4.434+ (PyPI has 2.4.540): 27 (2.4.418 and older
+# installs: 10 + any OpenAI-compatible endpoint) — OpenAI, Anthropic, Google, DeepSeek, AWS Bedrock,
 # GCP Vertex, Azure Foundry, xAI Grok (XAI_API_KEY), Mistral (MISTRAL_API_KEY),
 # local/self-hosted, and 17 chat-completions vendors — OpenRouter, Groq,
 # Cerebras, Moonshot Kimi, Alibaba Qwen, Z.AI GLM, MiniMax, Inception, Meta
@@ -120,6 +120,8 @@ every setting with its default (agent-config-fields.md → Runtime Config Blocks
 ```yaml
 # ── Top-level ──
 name: "my_mesh"
+description: "A support team that answers customer tickets for a SaaS company."
+                                       # 2.4.534: what the agency does and for whom (the Manager reads it)
 version: "1.0.0"
 architecture: "managed_mesh"    # Only supported type
 environment: "development"      # development | production
@@ -148,18 +150,14 @@ manager:
   # on by default — omit `enabled`; set `enabled: false` only to disable
   # coordination + the summarizer entirely (rare; no interventions, no feed)
   model: "gpt-4o-mini"                 # Model for summarizer LLM calls
-  domain: "generic"                     # Summarizer domain specialization
   can_intervene: true                   # Allow automatic interventions
   health_check_interval: 60            # Seconds between health checks
   agent_timeout_threshold: 180         # Seconds before agent timeout
   chain_completion_timeout: 1800.0     # Seconds for can_call chain completeness
-  coordination_rules: {}               # Custom business rules (max_call_depth, agent_rules, reflection_budget, …)
+  coordination_rules: {}               # reflection_budget (default 2); other keys only warn at start
   # The rule sets sit DIRECTLY under manager: — never under
   # coordination_rules: (2.4.482; an old file is moved at load, with a warning)
-  human_input_rules:
-    max_concurrent_requests: 3
-    max_agent_requests: 5
-    enable_request_queuing: true
+  # human_input_rules: REMOVED in 2.4.528 (dropped with one warning) — say it in a prompt
   # timeout_rules: REMOVED in 2.4.486 (dropped with a warning) — a seat waits its
   # time and stops; nobody answering is not escalated
   workflow_pause_rules:
@@ -191,24 +189,17 @@ mesh:
                                        # (session status=stopped + ChainCapExceeded). Raise for deep
                                        # research/batch-fanout flows; NOT a fix for unbounded retry edges
   reply_stream: false                  # default false; always on in workers mode
-  # Provider accounts are vault-only (2.4.481): region / endpoint_url /
-  # project / location / endpoint / headers written here FAIL TO LOAD.
-  bedrock:                             # AWS Bedrock (optional)
-    connection: "aws-bedrock"          # AWS Bedrock connection: region (+ endpoint_url)
-    profile: null                      # AWS profile name on the host
-  vertex:                              # Google Vertex AI (optional)
-    connection: "gcp-vertex"           # Google Vertex connection: project_id + location
-  foundry:                             # Azure AI Foundry (optional)
-    connection: "azure-foundry"        # Azure Foundry connection: endpoint + key
-    api_version: null
+  # No bedrock: / vertex: / foundry: blocks (removed 2.4.534): a bedrock/…,
+  # vertex/… or foundry/… agent picks its cloud record with model_connection.
 
 # ── Entry Points ──
 # `target:` must name an agent DEFINED in this same config — the loader
 # rejects a target it cannot resolve.
+# No `condition:` — deprecated in 2.4.533 and never checked; an entry point
+# is taken when named.
 entry_points:
   - name: "greet_user"
     target: "agent_name"
-    condition: "always"
 
 # ── Skills — NOT configured here ──
 # There is NO top-level skills: block (the loader rejects unknown top-level
@@ -466,7 +457,9 @@ agents:
       connection: "mcp-search"              # Integrations → MCP (or "Add custom", service type 'Tools'): server URL + auth_token
       # timeout: 60
 
-  # stdio transport — launches local MCP server process
+  # stdio transport — developers self-hosting only: starts a program on the
+  # mesh's host, and only one named in LEAFMESH_MCP_COMMAND_ALLOWLIST (.env);
+  # otherwise the agent is skipped. Everyone else: the web-address MCP above.
   mcp_stdio_agent:
     name: "mcp_stdio_agent"
     agent_type: "external"
@@ -587,7 +580,8 @@ mesh (outside one it raises).
 **Since 2.4.497 `mcp()` works the same way:** `mcp("tool_name",
 connection="<Tools record>")` — the record holds the server's address and
 sign-in. The old `mcp("https://…", "tool")` and an inline `auth_token=` are
-refused, naming the record to make. A local server keeps its command in code
+refused, naming the record to make. A local server (developers self-hosting only; the program must be named in
+`LEAFMESH_MCP_COMMAND_ALLOWLIST` in `.env`) keeps its command in code
 and its keys in the record: `mcp("tool", connection="<record>",
 transport="stdio", command="npx", args=[...])` — the record's rows become the
 command's environment variables.
@@ -708,13 +702,15 @@ leafmesh vault rotate-key --new-key-file PATH [--generate] [--old-key-file PATH]
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `LEAFMESH_LICENSE_KEY` | Yes | License key from leafcraft.ai |
-| `LEAFMESH_ENV_TOKEN` | No | Environment token — scopes HITL data + telemetry per environment |
+| `LEAFMESH_LICENSE_KEY` | Once, never kept | Licence key from leafcraft.ai. Since 2.4.538 it signs the environment in once (`leafmesh auth register` asks for it, or set it for the first start only) and is never stored — keep it out of `.env` |
+| `LEAFMESH_ENV_TOKEN` | Yes | Environment token from Studio — needed at every start (`LeafMeshLicenseError` when missing); scopes the store, HITL data and telemetry per environment |
+| `LEAFMESH_VAULT_KEY` | Yes | 32 random bytes, URL-safe base64; with none the mesh stops at start (2.4.507). A new key means a new, empty vault |
+| `LEAFMESH_WEBHOOK_SECRET` | For signed webhooks | Same format; without it signed webhooks answer 503 (2.4.507) |
 | `OPENAI_API_KEY` | For OpenAI models | OpenAI API key |
 | `ANTHROPIC_API_KEY` | For Claude models | Anthropic API key |
 | `GOOGLE_API_KEY` | For Gemini models | Google AI API key (`GEMINI_API_KEY` also read) |
 | `DEEPSEEK_API_KEY` | For DeepSeek models | DeepSeek API key |
-| `AZURE_FOUNDRY_API_KEY` | For Foundry | Foundry key (`AZURE_OPENAI_API_KEY` also read); endpoint in `AZURE_FOUNDRY_ENDPOINT` or on the Azure Foundry record (`mesh.foundry.connection`) — `mesh.foundry.endpoint` is refused since 2.4.481 |
+| `AZURE_FOUNDRY_API_KEY` | For Foundry | Foundry key (`AZURE_OPENAI_API_KEY` also read); endpoint in `AZURE_FOUNDRY_ENDPOINT` or on the Azure Foundry record (the agent's `model_connection`) — an endpoint in YAML is refused since 2.4.481 |
 | `LEAFMESH_AGENCY_NAME` | With `LeafMesh.from_store()` | The agency's name — every key in the store is filed under it. `from_store()` raises `ConfigError` when it is unset. With `from_yaml` the name comes from config.yaml's `name:`; if both are set, keep them equal |
 | `LEAFMESH_STORE` | No | Datastore backend: `redis` (default) \| `postgres`. **The datastore is set ONLY in `.env` (2.4.482)** — a `persistence:`/`redis:` block in the YAML is ignored with a boot warning (2.4.482–2.4.485); from 2.4.486 `LeafMesh.from_yaml` raises `ConfigError` if it differs from `.env`. Set only what you need; the rest default. Studio → Infrastructure → Datastores shows reachability, never the address or password |
 | `REDIS_URL` / `DATABASE_URL` | No | The whole server in one value: `redis://user:pw@host:6379/4` (`rediss://` = TLS) or `postgresql://user:pw@host:5432/db?sslmode=require`. The single names below fill in what the URL leaves out |
@@ -759,14 +755,14 @@ leafmesh vault rotate-key --new-key-file PATH [--generate] [--old-key-file PATH]
 
 ## Webhook HMAC Authentication
 
-For human agents with webhooks, the SDK auto-derives an HMAC secret from your license key:
+Signed webhooks use `LEAFMESH_WEBHOOK_SECRET` from `.env` (2.4.507: nothing is
+derived from the licence key any more; with no secret, signed webhooks answer 503):
 
 ```python
-from leafmesh import derive_webhook_secret, get_webhook_secret
+from leafmesh import get_webhook_secret
 
-# Derived from LEAFMESH_LICENSE_KEY automatically
-secret = get_webhook_secret()
-# Use for verifying inbound webhook signatures
+secret = get_webhook_secret()   # LEAFMESH_WEBHOOK_SECRET, or None when unset
+# Use it to sign / verify X-LeafMesh-Signature
 ```
 
 ## Error Handling

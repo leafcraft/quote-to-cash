@@ -5,7 +5,7 @@ with ONLY the human-response meta fields (human_message, human_decision,
 …) — the deal payload that was flowing through the chain is not
 re-delivered to the next agent. discount_policy_agent stashes the full
 RFQ + cost + discount context here, keyed by session_id, so
-quote_drafter (and the audit sink) can recover it after the human gate.
+quote_drafter (and the audit sink) can recover it after the human step.
 
 In-process only — survives the human wait because the mesh is one
 process. A multi-replica deployment swaps this for the Redis session

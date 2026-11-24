@@ -3,7 +3,7 @@
 The brief behind the team's configuration (`create-leafmesh --start` loads it
 into the store once; after that it is changed in Studio). This pod runs a deal from an inbound
 RFQ all the way to **cash**, as a **team** of self-reliant agents — a
-coordinator, specialists, a finisher, first-class human gates, and a WORM
+coordinator, specialists, a finisher, first-class human steps, and a WORM
 sink — supervised by the LeafMesh Manager. Not a pipeline.
 
 Design doctrine: `.claude/skills/leafmesh/building-agents-thoroughly.md`.
@@ -27,7 +27,7 @@ SDK baseline: **2.4.131**.
                                                                                        ▼
                           audit ◀── issuer ◀──(drafted)── drafter ◀────────────────────┘
                         (WORM)   (FINISHER: re-check approval, re-derive required
-                                  approver, render ./out/<quote>.pdf, DELETE-ON-BLOCK)
+                                  decision-maker, render ./out/<quote>.pdf, DELETE-ON-BLOCK)
 
   quote_accepted ─▶ billing (invoice) ─┐
   dunning_sweep ──▶ billing (dun, ×copies, atomic claim) ─┴─▶ RevOps Lead (severe) + audit
@@ -78,7 +78,7 @@ Day-0 **tools** read the seeded price book / deal history / competitor store and
   margin. These three keys drive the approval matrix.
 
 Cass **stashes the full deal pre-gate** (session_stash) so the drafter and
-issuer recover it after the human gate drops the chain payload.
+issuer recover it after the human step drops the chain payload.
 
 **The approval matrix lives on Cass's wires** (amount × margin × discount):
 
@@ -103,7 +103,7 @@ real tier. Never auto-sends. Wire: `drafted → quote_issuer`.
 The artifact-producing executor — the load-bearing control ([doctrine B4]):
 1. **Re-checks approval** — only an explicit approve counts; an
    unknown/ambiguous verdict **fails closed**.
-2. **Re-derives the required approver in code** from the recovered financials
+2. **Re-derives the required decision-maker in code** from the recovered financials
    (the same matrix Cass's wires encode) and requires the seat that actually
    approved (the drafter records the reply's `source_agent`) to match or
    out-rank it — no under-approved issue; no seat on record = not cleared.
@@ -131,16 +131,19 @@ zone, not UTC. **`@chain` billing floor** re-checks each claimed invoice and
 last` merge concatenates them. Wires: `escalations != [] → revops_lead`,
 `worked != [] → audit`.
 
-### 3.6 Human members (Studio Inbox · dual · nothing moves on silence)
+### 3.6 Human members (Studio Inbox · chain + reply reader · nothing moves on silence)
 Rep / Deal Desk / Finance / CFO decide their tier; the **RevOps Lead** is the
-accountable owner (the Manager's escalation target for errors). A reject or
-hold goes to the audit sink. If nobody answers within the reply window (rep 4 h,
-deal desk 4 h, finance 8 h, CFO 24 h, RevOps Lead 24 h), the Inbox card closes
-and the ticket records that no reply came — **nothing is approved or issued on
-silence**, and nobody is chased automatically. `fallback_on_timeout` +
-`fallback_response → held_for_review` stay in the config as the declared intent;
-on leafmesh 2.4.486 a dual seat's timeout does not route it yet. `dual` is on the human
-boundary only; every downstream peer is `chain` (no dual→dual ping-pong).
+accountable owner (the Manager's escalation target for errors). The Inbox has
+no buttons: the person types a reply and a `reply_reader` (`gpt-4o-mini`) turns
+it into a `verdict` — `approve` / `reject` / `hold` on the deciding seats (the
+rep also has `resubmit`), `hold` on the RevOps Lead. `approve` goes to the
+drafter, `resubmit` back to Cass, and a reject or hold goes to the audit sink;
+`answer` (the person answered an agent's question) goes back to only the agent
+that asked. If nobody answers within the reply window (rep 4 h, deal desk 4 h,
+finance 8 h, CFO 24 h, RevOps Lead 24 h), the seat's `fallback_response`
+(`verdict: hold`, `held_for_review`) goes through its routes like any reply and
+lands in the audit log — **nothing is approved or issued on silence**, and
+nobody is chased automatically. No person seat calls another person seat.
 
 ### 3.7 qtc_audit_logger_agent — WORM sink (external, custom)
 Hash-chained, append-only, the terminus of every path. Registered in `main.py`

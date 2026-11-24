@@ -24,9 +24,9 @@ It returns the artifact path/id + a summary.
 
 FAIL-CLOSED FLOOR (@chain enforce_issuance_floor): a quote is NEVER issued
 if the deal was not approved, or if its discount TIER was not cleared by
-the REQUIRED approver. The required approver is re-derived in code from the
+the REQUIRED decision-maker. The required decision-maker is re-derived in code from the
 recovered financials (the same amount × margin × discount matrix Cass's
-wires encode). The approver who actually cleared it is the human seat the
+wires encode). The decision-maker who actually cleared it is the human seat the
 drafter recorded from the reply (`source_agent`); no seat on record = not
 cleared. So the issuer cannot be tricked into issuing an under-approved
 deal even if an upstream marker is wrong. If the floor
@@ -73,7 +73,7 @@ _FINANCE_MAX_CENTS = 100_000_000
 
 def _required_approver(total_list_cents: int, gross_margin_pct: float,
                        discount_pct: float) -> str:
-    """The single approver tier that MUST clear this deal — recomputed from
+    """The single decision-maker tier that MUST clear this deal — recomputed from
     the financials exactly as discount_policy_agent's wires do. Fail-closed:
     anything off the healthy/cheap band escalates upward."""
     if (gross_margin_pct < _MARGIN_FLOOR or discount_pct > 0.30
@@ -125,14 +125,14 @@ def _validity_date(validity_days: int) -> str:
 
 # ── Approval signal ──────────────────────────────────────────────────
 def _was_approved(input_data: dict, context: dict, deal: dict) -> bool:
-    """Did a human gate clear this deal with 'approve'? quote_drafter is
+    """Did a human step clear this deal with 'approve'? quote_drafter is
     only reached on an approve route, so reaching the issuer already implies
     approval — but we re-check the human signal/stash so the floor stands on
     its own (a direct call with no approval is blocked)."""
     for src in (input_data, context, deal):
         if not isinstance(src, dict):
             continue
-        msg = str(src.get("human_message", "")).strip().lower()
+        msg = str(src.get("verdict") or src.get("human_message") or "").strip().lower()
         if msg in ("approve", "approved"):
             return True
         if str(src.get("approval_status", "")).strip().lower() in ("approved", "approve"):
@@ -368,9 +368,9 @@ def _block_reasons(approved: bool, required: str, cleared: str) -> list[str]:
 
 def enforce_issuance_floor(result: dict, context: dict) -> dict:
     """Block any quote that wasn't approved or whose discount tier wasn't
-    cleared by the REQUIRED approver. Fail-closed: on a trip we suppress
-    the artifact and mark the result blocked. The required approver is the
-    one re-derived from the financials; the actually-cleared approver must
+    cleared by the REQUIRED decision-maker. Fail-closed: on a trip we suppress
+    the artifact and mark the result blocked. The required decision-maker is the
+    one re-derived from the financials; the actually-cleared decision-maker must
     match (or out-rank) it."""
     if not isinstance(result, dict):
         return result
@@ -461,7 +461,7 @@ async def quote_issuer_agent(llm_response: Any, input_data: Any,
     discount_cents = int(round(subtotal * discount_pct))
     total_cents = subtotal - discount_cents
 
-    # Which approver MUST clear this (re-derived) and who actually did.
+    # Which decision-maker MUST clear this (re-derived) and who actually did.
     required = _required_approver(total_list_cents or subtotal, gross_margin_pct, discount_pct)
     approved = _was_approved(input_data, context, stashed)
     # Who cleared it: the human seat the drafter recorded from the reply
