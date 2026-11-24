@@ -188,7 +188,7 @@ and the data on its own volume.
 | A human seat's `channels` (Slack, email, …) | The agency reloads itself in place within seconds |
 | Add or delete an agent in Studio | At once, including routes and schedules |
 | A connection in the vault (model keys, MCP, webhooks, connectors, Slack, email) | At once. An agent switched off for a missing connection or address switches back on by itself |
-| Anything in `.env` (licence, agency name, store, ports) | After `docker compose up -d` (the container is recreated) |
+| Anything in `.env` (agency name, store, ports, model keys) | After `docker compose up -d` (the container is recreated) |
 | Python code (`agency/*.py`: programmatic agents, tools, `@pre_compose`) | After a rebuild: `docker compose up -d --build` |
 | The team's starting configuration | Loaded once by `create-leafmesh --start` into an empty store; after that, change it in Studio |
 | Several app containers on one store | A Studio save reaches every one within about 15 seconds |
@@ -226,18 +226,20 @@ From leafmesh 2.4.482 the store (Redis or Postgres) is set **only in `.env`** �
 - With Docker Compose the app reaches Redis as `redis` (the service name); compose sets that for you.
 - Check it in Studio → **Infrastructure → Datastores**: it shows whether the store is reachable (never the address or password).
 
-## This mesh's sign-in (leafmesh 2.4.497)
+## This mesh's sign-in (leafmesh 2.4.497; licence never kept since 2.4.538)
 
 From leafmesh 2.4.497 each mesh signs in to LeafCraft with its own key, not
 a key shared by every install.
 
-- **First start.** The mesh makes a key pair and registers it with
-  `LEAFMESH_LICENSE_KEY` and `LEAFMESH_ENV_TOKEN` from `.env` (copy the
-  environment token from Studio — a placeholder such as `development` is
-  refused). With both valid it works at once. If your organisation turned on
-  "require approval", the first start stops and says so: approve it in
-  Studio → **Keys → SDK access**, then start again. Organisation admins get an
-  email for every new registration.
+- **First start.** `create-leafmesh --start` (or `--load`) asks for your
+  LeafCraft licence key once (not shown) and signs this environment in: the
+  mesh makes a key pair and registers it with that key and
+  `LEAFMESH_ENV_TOKEN` from `.env` (copy the environment token from Studio —
+  a placeholder such as `development` is refused). The licence key is never
+  saved, in `.env` or anywhere else, and later starts don't ask. If your
+  organisation turned on "require approval", the first start stops and says
+  so: approve it in Studio → **Keys › Mesh access**, then start again.
+  Organisation admins get an email for every new registration.
 - **Where the key lives.** In the vault, in the store, encrypted with
   `LEAFMESH_VAULT_KEY`: it survives rebuilds and every copy of the app shares
   it. A new Redis volume, or a new vault key, makes a new key pair that

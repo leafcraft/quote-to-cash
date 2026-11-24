@@ -1068,8 +1068,30 @@ carries no shared key.
   identity outside the organisation's trusted connection is refused, not
   pending.
 - **Every pod shares one sign-in** through the store: they need the same
-  `LEAFMESH_ENV_TOKEN`, `LEAFMESH_VAULT_KEY` and store. A revoked or expired
-  sign-in: run `leafmesh auth register` again (or `leafmesh auth rotate`).
+  `LEAFMESH_ENV_TOKEN`, `LEAFMESH_VAULT_KEY` and store. The first pod makes
+  and registers the key pair under a store lock; the others wait and use it.
+  One registration per environment, never per pod. A revoked or expired key:
+  `leafmesh auth rotate` (a revoked key is never revived), then start again.
+- **Back up `LEAFMESH_VAULT_KEY`.** Lost or changed, the vault cannot be read:
+  the start is refused (VaultKeyError) and only the backed-up key restores it.
+  A wiped store (vault record gone) makes a new key pair that registers again
+  — the licence key once more, approval if required, revoke the old in Studio.
+- **Passes:** the mesh asks LeafCraft for short-lived passes (900 s), renewed
+  at ~80 % of their life. LeafCraft down: the current pass is kept while it
+  lasts and asked again every 30 s; a running mesh is never stopped for no
+  answer. LeafCraft's limits: 20 keys per environment, an unused key expires
+  after 90 days, a revocation lands within ~30 s.
+- **Dev to production:** production has its own `LEAFMESH_ENV_TOKEN` (same
+  licence). The token names the store's data, so production has its own
+  vault, key pair, sign-in (licence once) and approval.
+- **A suspended organisation (leafmesh-dev, PR #50; not yet on PyPI)** is told
+  plainly: "This organisation is suspended by LeafCraft … Contact LeafCraft
+  support." New sessions are refused (quota blockedReason
+  ORGANIZATION_SUSPENDED); the sign-in line says it (/sdk/token reason
+  organization_suspended); if LeafCraft also stops running agents
+  (validateToken licenseStatus ORGANIZATION_SUSPENDED) the mesh stops and a
+  start is refused with the same words. Never shown as an expired licence;
+  the key pair is kept. Don't tell a user to rotate for a suspension.
 - **Key store:** always the vault — encrypted with `LEAFMESH_VAULT_KEY` in
   the mesh's store, shared by every replica (the first makes it under a
   lock). A wiped store or a new vault key makes a new key pair that registers
