@@ -2,7 +2,7 @@
 
 This document lists every configuration field, its type, default value, and accepted values. Use this to build frontend forms, dropdowns, and validation.
 
-**SDK baseline: 2.4.542** (templates pin `leafmesh>=2.4.542`). The fields below make up the agency's configuration document, which **lives in its store** since 2.4.481 — a create-leafmesh project ships no configuration file (`create-leafmesh --start` loads the team with `leafmesh config import --if-empty`; a file given to `from_yaml` is imported only on the first boot); after that it is changed in Studio or through the config API, and a saved setting applies without a restart ([When a saved setting applies](#when-a-saved-setting-applies-24484)).
+**SDK baseline: 2.4.544** (templates pin `leafmesh>=2.4.542`, which installs 2.4.544 from PyPI). The fields below make up the agency's configuration document, which **lives in its store** since 2.4.481 — a create-leafmesh project ships no configuration file (`create-leafmesh --start` loads the team with `leafmesh config import --if-empty`; a file given to `from_yaml` is imported only on the first boot); after that it is changed in Studio or through the config API, and a saved setting applies without a restart ([When a saved setting applies](#when-a-saved-setting-applies-24484)).
 
 ---
 
@@ -686,7 +686,7 @@ A known model whose provider has **no key** is refused plainly (2.4.482):
 "model 'X' needs the <provider> provider, which has no key here — add one on
 Infrastructure → Models, then try again" — never sent to the local model.
 
-**Provider count depends on the SDK:** 2.4.434 and later (PyPI has 2.4.542)
+**Provider count depends on the SDK:** 2.4.434 and later (PyPI has 2.4.544)
 have 27 (the lists below); 2.4.418 and older installs have 10 built in plus
 any OpenAI-compatible endpoint.
 

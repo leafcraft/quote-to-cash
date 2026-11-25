@@ -1,6 +1,6 @@
 # LeafMesh — Nuances & Gotchas (READ FIRST)
 
-**SDK baseline: 2.4.542** (templates pin `leafmesh>=2.4.542`). This file captures the non-obvious rules that cause
+**SDK baseline: 2.4.544** (templates pin `leafmesh>=2.4.542`, which installs 2.4.544 from PyPI). This file captures the non-obvious rules that cause
 real, hard-to-debug failures. Most "my agent silently does nothing" or "the
 handoff looks empty" or "Gemini behaves differently from GPT" reports trace to
 exactly one item below. Read this before wiring agents.
@@ -249,9 +249,9 @@ cleanly with a `budget_exhausted` marker; `escalate` routes to the Manager.
   even monthly pace keeps taking every task, but each gets one normal task's
   share; the owner gets a daily Inbox notice, and it is back to normal once on
   pace. Every LLM task, budget or not, also has a ceiling learned from the
-  agent's normal tasks (about 4× a typical one, once 10 are known). At the
-  ceiling no more tools run and the task answers from what it has. Neither has
-  a field. Never tell the user to "raise the budget" for this, and do not add
+  agent's normal tasks (about 4× a typical one, once 10 are known). Since
+  2.4.543 the ceiling stops only a task that repeats the same calls; a task
+  still making progress goes on past it. Neither has a field. Never tell the user to "raise the budget" for this, and do not add
   tool-count or token caps to protect cost — tune `max_tool_calls_per_message`
   only for behaviour.
 - **External agents count too.** Each external-agent call's self-reported spend
@@ -1038,6 +1038,24 @@ target for that:
   model never shares answers with the agent's model (2.4.488).
 
 ---
+
+## The model's copy is masked, not the code's (2.4.544)
+
+- The content guard hides credentials and personal data from an agent's
+  **model** only. Since 2.4.544 the agent's own code — its decorators and the
+  agent function — reads the real input. Before 2.4.544 the code got the
+  masked copy too, so code that parsed an email or account number saw a
+  placeholder.
+- So put exact handling of such values (matching, lookups, writes) in code or a
+  tool, never in the prompt. Don't encode or split a value to get it past the
+  guard: the model is meant not to see it.
+- No setting was added or removed.
+
+## Health checks change nothing outside the mesh (2.4.543)
+
+- A health check never runs a tool that changes anything outside the mesh, and
+  it scores each agent on its last answer. Leaving checks on in production
+  cannot send, book or write anything.
 
 ## The mesh's own sign-in (2.4.538)
 

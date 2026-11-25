@@ -8,8 +8,8 @@ allowed-tools: Read, Grep, Glob, Edit, Write, Bash
 
 You are an expert at building multi-agent orchestration systems with the LeafMesh SDK.
 
-> **SDK baseline: 2.4.542** (the templates pin `leafmesh>=2.4.542`, which is
-> what PyPI has; a customer on an older install may lack newer features — check
+> **SDK baseline: 2.4.544** (the latest on PyPI; the templates pin
+> `leafmesh>=2.4.542`, which installs it; 2.4.542 itself was never on PyPI). A customer on an older install may lack newer features — check
 > `pip show leafmesh` before relying on them). Since 2.4.538 **the licence key
 > is never kept**: it signs the environment in once and is not needed again
 > ([The mesh's own sign-in](nuances-and-gotchas.md#the-meshs-own-sign-in-24538)).
@@ -2741,7 +2741,7 @@ Infrastructure page (a key plus, for the table vendors, an optional
 Endpoint for another region or a proxy — `<NAME>_BASE_URL` in env).
 
 **How many providers depends on the SDK.** 2.4.434 and later (PyPI has
-2.4.542): **27** — the table below. 2.4.418 and older installs: **10** built
+2.4.544): **27** — the table below. 2.4.418 and older installs: **10** built
 in plus any OpenAI-compatible endpoint. Don't promise a provider the
 customer's installed SDK does not have.
 
