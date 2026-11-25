@@ -77,7 +77,7 @@ posts, next_cursor = await sdk.get_agent_feed("agent_name", count=50, cursor="+"
 posts, next_cursor = await sdk.get_session_feed("session_id", count=50, cursor="+")
 
 # Custom LLM provider — use only for providers NOT already built in.
-# Built-in providers — 2.4.434+ (PyPI has 2.4.540): 27 (2.4.418 and older
+# Built-in providers — 2.4.434+ (PyPI has 2.4.542): 27 (2.4.418 and older
 # installs: 10 + any OpenAI-compatible endpoint) — OpenAI, Anthropic, Google, DeepSeek, AWS Bedrock,
 # GCP Vertex, Azure Foundry, xAI Grok (XAI_API_KEY), Mistral (MISTRAL_API_KEY),
 # local/self-hosted, and 17 chat-completions vendors — OpenRouter, Groq,

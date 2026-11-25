@@ -1,6 +1,6 @@
 # LeafMesh — Nuances & Gotchas (READ FIRST)
 
-**SDK baseline: 2.4.540** (templates pin `leafmesh>=2.4.540`). This file captures the non-obvious rules that cause
+**SDK baseline: 2.4.542** (templates pin `leafmesh>=2.4.542`). This file captures the non-obvious rules that cause
 real, hard-to-debug failures. Most "my agent silently does nothing" or "the
 handoff looks empty" or "Gemini behaves differently from GPT" reports trace to
 exactly one item below. Read this before wiring agents.
